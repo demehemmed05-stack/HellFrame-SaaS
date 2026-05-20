@@ -1,1 +1,7 @@
 .env
+bot_production.log
+user_subscriptions.json
+price_alerts.json
+used_transactions.json
+*.tmp
+__pycache__/
