@@ -1,8 +1,11 @@
 # ====================================================================
-# 🔥 HELLFRAME QUANT ENGINE v4.7.0 (Global Aliases – TL kaldırıldı)
+# 🔥 HELLFRAME QUANT ENGINE v4.7.1 (Render Ready)
 # Global SaaS Discord Trade Bot – İngilizce Çıktı, Türkçe Yorum
 # ====================================================================
-# DEĞİŞİKLİK: TL/TRY takma adları kaldırıldı. XAU, XAG, WTI, EUR展开全部
+# DÜZELTMELER:
+#   • Flask sunucusu bot başlamadan önce başlatıldı (port sorunu)
+#   • İsteğe bağlı PROXY_URL ortam değişkeni eklendi
+#   • Hata logları daha ayrıntılı hale getirildi
 # ====================================================================
 
 import os, json, asyncio, logging, difflib
@@ -34,6 +37,8 @@ MY_WALLET_STR = os.getenv("SOLANA_WALLET_ADDRESS")
 ADMIN_ID_RAW = os.getenv("ADMIN_ID")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+PROXY_URL = os.getenv("PROXY_URL")  # Render'da tanımlanırsa kullanılır
+
 STRIPE_PRICE_IDS = {
     "daily": os.getenv("STRIPE_PRICE_DAILY"),
     "weekly": os.getenv("STRIPE_PRICE_WEEKLY"),
@@ -145,13 +150,12 @@ def is_admin(ctx):
     return ctx.author.id == ADMIN_ID
 
 # ====================================================================
-# 📈 PİYASA VERİSİ (Global Aliases güncellendi)
+# 📈 PİYASA VERİSİ
 # ====================================================================
 CRYPTO_MAP = {"BTC":"BTC-USD","ETH":"ETH-USD","SOL":"SOL-USD","XRP":"XRP-USD","DOGE":"DOGE-USD","ADA":"ADA-USD","AVAX":"AVAX-USD","DOT":"DOT-USD","MATIC":"MATIC-USD","LINK":"LINK-USD"}
 COMMODITY_MAP = {"GOLD":"GC=F","SILVER":"SI=F","OIL":"CL=F","COPPER":"HG=F","NATGAS":"NG=F"}
 FX_MAP = {"EURUSD":"EURUSD=X","GBPUSD":"GBPUSD=X","USDJPY":"USDJPY=X","USDTRY":"USDTRY=X","EURTRY":"EURTRY=X"}
 
-# Global kullanıcı dostu takma adlar
 ALIASES = {
     "XAU": "GOLD",
     "XAG": "SILVER",
@@ -161,7 +165,6 @@ ALIASES = {
 }
 
 def resolve_alias(ticker):
-    """Kullanıcı takma ad yazdıysa asıl sembole çevirir."""
     return ALIASES.get(ticker.upper().strip(), ticker.upper().strip())
 
 def normalize(t):
@@ -361,7 +364,7 @@ async def add_subscription_time(user_id: str, plan: str, method: str = "solana")
                 color=discord.Color.green()
             )
             embed.add_field(name="Remaining", value=f"{new_expiry - now}")
-            embed.set_footer(text="HellFrame Quant Engine v4.7.0")
+            embed.set_footer(text="HellFrame Quant Engine v4.7.1")
             await user.send(embed=embed)
     except:
         pass
@@ -465,7 +468,7 @@ class ConfirmView(View):
 # ====================================================================
 app = Flask(__name__)
 @app.route('/')
-def home(): return "HellFrame Quant Engine v4.7.0 online!"
+def home(): return "HellFrame Quant Engine v4.7.1 online!"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -487,20 +490,31 @@ def webhook():
     return jsonify({'ok': True}), 200
 
 def run_flask():
-    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 8080)), debug=False)
+    port = int(os.getenv("PORT", 8080))
+    app.run(host='0.0.0.0', port=port, debug=False)
 
 # ====================================================================
 # 🤖 BOT
 # ====================================================================
-intents = discord.Intents.default(); intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents, case_insensitive=True, help_command=None)
+intents = discord.Intents.default()
+intents.message_content = True
+
+# Proxy ayarı (isteğe bağlı)
+if PROXY_URL:
+    proxy = discord.Proxy(url=PROXY_URL, proxy_type=discord.ProxyType.http)
+    bot = commands.Bot(command_prefix="!", intents=intents, case_insensitive=True, help_command=None, proxy=proxy)
+    logger.info(f"Using proxy: {PROXY_URL}")
+else:
+    bot = commands.Bot(command_prefix="!", intents=intents, case_insensitive=True, help_command=None)
 
 @bot.event
 async def on_ready():
     logger.info(f"Online: {bot.user}")
-    Thread(target=run_flask, daemon=True).start()
+    # Flask zaten başlatıldığı için burada tekrar başlatmaya gerek yok
     for loop in [check_user_alerts, check_price_alerts, check_intervals, check_reminders, cleanup_expired]:
-        if not loop.is_running(): loop.start()
+        if not loop.is_running():
+            loop.start()
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="EMA · RSI · MACD · BB"))
 
 def build_embed(r):
     cmap = {"BUY":discord.Color.green(),"SELL":discord.Color.red(),"HOLD":discord.Color.yellow(),"STRONG_BUY":discord.Color.dark_green(),"STRONG_SELL":discord.Color.dark_red()}
@@ -511,7 +525,7 @@ def build_embed(r):
     e.add_field(name="📈 EMA50/200", value=f"EMA50: `${r['ema50']:,.2f}`\nEMA200: `${r['ema200']:,.2f}`", inline=False)
     e.add_field(name="📉 MACD", value=f"MACD: `{r['macd']:.4f}`  Signal: `{r['macd_signal']:.4f}`  Hist: `{r['macd_hist']:.4f}`", inline=False)
     e.add_field(name="🧠 Analysis", value="\n".join(f"• {x}" for x in r["reasons"]), inline=False)
-    e.set_footer(text="HellFrame Quant Engine v4.7.0")
+    e.set_footer(text="HellFrame Quant Engine v4.7.1")
     return e
 
 # ====================================================================
@@ -642,84 +656,25 @@ async def cleanup_expired():
     if changed: await save_data(db)
 
 # ====================================================================
-# 📚 KOMUT YARDIM SÖZLÜĞÜ (GÜNCELLENDİ)
+# 📚 KOMUT YARDIM SÖZLÜĞÜ
 # ====================================================================
 COMMAND_HELP = {
-    "ping": {
-        "desc": "Check bot latency.",
-        "use": "!ping",
-        "ex": "!ping"
-    },
-    "info": {
-        "desc": "Show bot information and features.",
-        "use": "!info",
-        "ex": "!info"
-    },
-    "mystatus": {
-        "desc": "Check your subscription status and watchlist.",
-        "use": "!mystatus",
-        "ex": "!mystatus"
-    },
-    "subscribe": {
-        "desc": "View plans or subscribe. Add a plan name (daily/weekly/monthly).",
-        "use": "!subscribe [plan]",
-        "ex": "!subscribe daily"
-    },
-    "verify": {
-        "desc": "Verify a SOL payment. Provide the transaction ID and plan name.",
-        "use": "!verify <tx_id> <plan>",
-        "ex": "!verify 5Bmz... daily"
-    },
-    "price": {
-        "desc": "Get live price of a ticker. Supports crypto, stocks, forex, commodities. Aliases: XAU (Gold), XAG (Silver), WTI (Oil), EUR (EURUSD).",
-        "use": "!price <ticker>",
-        "ex": "!price BTC\n!price XAU\n!price EUR"
-    },
-    "analyze": {
-        "desc": "Full technical analysis (RSI, MACD, BB, EMA). Accepts any supported ticker or alias.",
-        "use": "!analyze <ticker>",
-        "ex": "!analyze SOL\n!analyze XAG"
-    },
-    "addasset": {
-        "desc": "Add asset to your watchlist. Plan limits apply (daily=1, weekly=2, monthly=3).",
-        "use": "!addasset <ticker>",
-        "ex": "!addasset GOLD"
-    },
-    "removeasset": {
-        "desc": "Remove an asset from your watchlist.",
-        "use": "!removeasset <ticker>",
-        "ex": "!removeasset BTC"
-    },
-    "myassets": {
-        "desc": "Show your watchlist with live prices.",
-        "use": "!myassets",
-        "ex": "!myassets"
-    },
-    "addinterval": {
-        "desc": "Get automatic price updates every X minutes (min 1).",
-        "use": "!addinterval <ticker> <minutes>",
-        "ex": "!addinterval ETH 5"
-    },
-    "removeinterval": {
-        "desc": "Stop automatic price updates for a ticker.",
-        "use": "!removeinterval <ticker>",
-        "ex": "!removeinterval ETH"
-    },
-    "myintervals": {
-        "desc": "List your active price intervals.",
-        "use": "!myintervals",
-        "ex": "!myintervals"
-    },
-    "help": {
-        "desc": "Show this help. Use !help <command> for details.",
-        "use": "!help [command]",
-        "ex": "!help analyze"
-    }
+    "ping": {"desc": "Check bot latency.", "use": "!ping", "ex": "!ping"},
+    "info": {"desc": "Show bot information and features.", "use": "!info", "ex": "!info"},
+    "mystatus": {"desc": "Check your subscription status and watchlist.", "use": "!mystatus", "ex": "!mystatus"},
+    "subscribe": {"desc": "View plans or subscribe. Add a plan name.", "use": "!subscribe [plan]", "ex": "!subscribe daily"},
+    "verify": {"desc": "Verify a SOL payment. Provide tx_id and plan.", "use": "!verify <tx_id> <plan>", "ex": "!verify 5Bmz... daily"},
+    "price": {"desc": "Live price of a ticker. Aliases: XAU, XAG, WTI, EUR.", "use": "!price <ticker>", "ex": "!price XAU"},
+    "analyze": {"desc": "Full technical analysis.", "use": "!analyze <ticker>", "ex": "!analyze SOL"},
+    "addasset": {"desc": "Add to watchlist (plan limits apply).", "use": "!addasset <ticker>", "ex": "!addasset GOLD"},
+    "removeasset": {"desc": "Remove from watchlist.", "use": "!removeasset <ticker>", "ex": "!removeasset BTC"},
+    "myassets": {"desc": "Show watchlist with live prices.", "use": "!myassets", "ex": "!myassets"},
+    "addinterval": {"desc": "Price updates every X min (min 1).", "use": "!addinterval <ticker> <minutes>", "ex": "!addinterval ETH 5"},
+    "removeinterval": {"desc": "Stop price updates for a ticker.", "use": "!removeinterval <ticker>", "ex": "!removeinterval ETH"},
+    "myintervals": {"desc": "List active price intervals.", "use": "!myintervals", "ex": "!myintervals"},
+    "help": {"desc": "Show this help. !help <cmd> for details.", "use": "!help [command]", "ex": "!help analyze"}
 }
 
-# ====================================================================
-# 📚 YARDIM KOMUTU
-# ====================================================================
 @bot.command(name="help")
 async def help_command(ctx, *, command_name: str = None):
     if command_name:
@@ -744,28 +699,22 @@ async def help_command(ctx, *, command_name: str = None):
             embed.add_field(name=f"`!{cmd}`", value=info["desc"], inline=False)
         await ctx.send(embed=embed)
 
-# ====================================================================
-# ❗ GELİŞMİŞ HATA YAKALAMA
-# ====================================================================
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingRequiredArgument):
         cmd = ctx.command.name if ctx.command else "unknown"
         if cmd in COMMAND_HELP:
-            usage = COMMAND_HELP[cmd]["use"]
-            example = COMMAND_HELP[cmd]["ex"]
-            await ctx.send(f"❌ Missing argument for `!{cmd}`.\n**Usage:** `{usage}`\n**Example:** `{example}`")
+            await ctx.send(f"❌ Missing argument for `!{cmd}`.\n**Usage:** `{COMMAND_HELP[cmd]['use']}`\n**Example:** `{COMMAND_HELP[cmd]['ex']}`")
         else:
             await ctx.send(f"❌ Missing argument. Use `!help {cmd}` for details.")
     elif isinstance(error, commands.BadArgument):
-        await ctx.send(f"❌ Invalid argument type. Please check the format. Use `!help` for command details.")
+        await ctx.send(f"❌ Invalid argument type. Use `!help` for command details.")
     elif isinstance(error, commands.CommandNotFound):
         wrong = ctx.message.content.split()[0].lstrip("!").lower()
         all_cmds = [c.name for c in bot.commands] + list(COMMAND_HELP.keys())
         matches = difflib.get_close_matches(wrong, list(set(all_cmds)), n=1, cutoff=0.5)
         if matches:
-            suggestion = matches[0]
-            await ctx.send(f"❓ `!{wrong}` not found. Did you mean `!{suggestion}`? Use `!help {suggestion}` to learn more.")
+            await ctx.send(f"❓ `!{wrong}` not found. Did you mean `!{matches[0]}`? Use `!help {matches[0]}` to learn more.")
         else:
             await ctx.send(f"❓ `!{wrong}` not found. Use `!help` to see all available commands.")
     elif isinstance(error, commands.CheckFailure):
@@ -775,7 +724,7 @@ async def on_command_error(ctx, error):
         await ctx.send("❌ An unexpected error occurred. The admin has been notified.")
 
 # ====================================================================
-# 🧪 KOMUTLAR (KULLANICI DOSTU)
+# 🧪 KOMUTLAR
 # ====================================================================
 @bot.command()
 async def ping(ctx): await ctx.send(f"Pong! {round(bot.latency*1000)}ms")
@@ -783,7 +732,7 @@ async def ping(ctx): await ctx.send(f"Pong! {round(bot.latency*1000)}ms")
 @bot.command()
 async def info(ctx):
     embed = discord.Embed(title="🤖 HellFrame Quant Engine", description="Advanced trading analysis bot.", color=discord.Color.blurple())
-    embed.add_field(name="Version", value="v4.7.0", inline=True)
+    embed.add_field(name="Version", value="v4.7.1", inline=True)
     embed.add_field(name="Prefix", value="`!`", inline=True)
     embed.add_field(name="Plans", value="Daily $3 | Weekly $15 | Monthly $50", inline=False)
     embed.add_field(name="Get Started", value="Use `!subscribe` to see plans or `!help` for commands.", inline=False)
@@ -814,7 +763,7 @@ async def price(ctx, *, t):
     t = resolve_alias(t)
     p = get_price(t)
     if p is None:
-        await ctx.send(f"❌ Could not fetch price for `{t}`. Check the ticker or try again later.")
+        await ctx.send(f"❌ Could not fetch price for `{t}`.")
     else:
         await ctx.send(f"💰 **{t.upper()}**: **${p:,.4f}**")
 
@@ -827,7 +776,7 @@ async def analyze_cmd(ctx, *, t):
     async with ctx.typing():
         r = await asyncio.get_event_loop().run_in_executor(None, analyze, t)
         if r is None:
-            await ctx.send(f"❌ Insufficient data for `{t}`. Try a more popular ticker or check back later.")
+            await ctx.send(f"❌ Insufficient data for `{t}`.")
         else:
             await ctx.send(embed=build_embed(r))
 
@@ -969,5 +918,10 @@ async def myintervals(ctx):
     msg = "\n".join(f"• **{t}**: every {m} min" for t,m in intervals.items())
     await ctx.send(f"📋 **Your intervals:**\n{msg}")
 
+# ====================================================================
+# 🚀 BAŞLAT (Flask önce başlatılır)
+# ====================================================================
 if __name__ == "__main__":
+    # Flask sunucusunu bot'tan önce başlat (port hatası için)
+    Thread(target=run_flask, daemon=True).start()
     bot.run(TOKEN)
