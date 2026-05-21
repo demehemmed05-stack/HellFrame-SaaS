@@ -1,12 +1,12 @@
 # ====================================================================
-# 🔥 HELLFRAME QUANT ENGINE v4.8.2 (Price Komutu Onarıldı)
+# 🔥 HELLFRAME QUANT ENGINE v4.8.3 (Admin Activate Komutu Eklendi)
 # Global SaaS Discord Trade Bot – İngilizce Çıktı, Türkçe Yorum
 # ====================================================================
-# DÜZELTME: !price komutunun kaybolması engellendi, argümansız kullanımda
-#           yardım gösteriliyor, "Did you mean !price?" hatası tamamen kaldırıldı.
+# YENİ: !activate <user_id> <duration> – Admin istediği kullanıcıya
+#        manuel süre tanımlar. !help'te gizlidir.
 # ====================================================================
 
-import os, json, asyncio, logging, difflib
+import os, json, asyncio, logging, difflib, re
 from pathlib import Path
 from asyncio import Lock, Semaphore
 from threading import Thread
@@ -318,9 +318,11 @@ def create_stripe_session(uid, plan):
         logger.error(f"Stripe session error: {e}")
         return None
 
-async def add_subscription_time(user_id: str, plan: str, method: str = "solana"):
+async def add_subscription_time(user_id: str, plan: str, method: str = "admin"):
+    """Bir kullanıcıya abonelik süresi ekler (admin veya ödeme ile)."""
     db = load_data(); uid = str(user_id)
-    now = datetime.now(timezone.utc); duration = timedelta(days=PLAN_DURATION[plan])
+    now = datetime.now(timezone.utc)
+    duration = timedelta(days=PLAN_DURATION.get(plan, 0))
     current_expiry = now
     if uid in db:
         try:
@@ -328,19 +330,26 @@ async def add_subscription_time(user_id: str, plan: str, method: str = "solana")
             if cur > now: current_expiry = cur
         except: pass
     new_expiry = current_expiry + duration
-    db[uid] = {"status":"Active","plan":plan,"expiry":new_expiry.isoformat(),
-               "assets":db.get(uid,{}).get("assets",[]),
-               "intervals":db.get(uid,{}).get("intervals",{}),
-               "payment_method":method,"last_paid":now.isoformat()}
+    db[uid] = {
+        "status": "Active",
+        "plan": plan,
+        "expiry": new_expiry.isoformat(),
+        "assets": db.get(uid, {}).get("assets", []),
+        "intervals": db.get(uid, {}).get("intervals", {}),
+        "payment_method": method,
+        "last_paid": now.isoformat()
+    }
     await save_data(db)
     try:
         user = await bot.fetch_user(int(user_id))
         if user:
-            embed = discord.Embed(title="✅ Subscription Updated",
-                                  description=f"**{plan.capitalize()}** plan activated.\nTotal expiry: **{new_expiry.strftime('%Y-%m-%d %H:%M UTC')}**",
-                                  color=discord.Color.green())
+            embed = discord.Embed(
+                title="✅ Subscription Activated",
+                description=f"**{plan.capitalize()}** plan activated.\nTotal expiry: **{new_expiry.strftime('%Y-%m-%d %H:%M UTC')}**",
+                color=discord.Color.green()
+            )
             embed.add_field(name="Remaining", value=f"{new_expiry - now}")
-            embed.set_footer(text="HellFrame Quant Engine v4.8.2")
+            embed.set_footer(text="HellFrame Quant Engine v4.8.3")
             await user.send(embed=embed)
     except: pass
 
@@ -425,7 +434,7 @@ class ConfirmView(View):
 # ====================================================================
 app = Flask(__name__)
 @app.route('/')
-def home(): return "HellFrame Quant Engine v4.8.2 online!"
+def home(): return "HellFrame Quant Engine v4.8.3 online!"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -472,7 +481,7 @@ def build_embed(r):
     e.add_field(name="📈 EMA50/200", value=f"EMA50: `${r['ema50']:,.2f}`\nEMA200: `${r['ema200']:,.2f}`", inline=False)
     e.add_field(name="📉 MACD", value=f"MACD: `{r['macd']:.4f}`  Signal: `{r['macd_signal']:.4f}`  Hist: `{r['macd_hist']:.4f}`", inline=False)
     e.add_field(name="🧠 Analysis", value="\n".join(f"• {x}" for x in r["reasons"]), inline=False)
-    e.set_footer(text="HellFrame Quant Engine v4.8.2")
+    e.set_footer(text="HellFrame Quant Engine v4.8.3")
     return e
 
 # ====================================================================
@@ -586,7 +595,7 @@ async def cleanup_expired():
     if changed: await save_data(db)
 
 # ====================================================================
-# 📚 KOMUT YARDIM SÖZLÜĞÜ (price komutu dahil)
+# 📚 KOMUT YARDIM SÖZLÜĞÜ (activate gizlidir)
 # ====================================================================
 COMMAND_HELP = {
     "ping": {"desc":"Check bot latency.","use":"!ping","ex":"!ping"},
@@ -640,9 +649,7 @@ async def on_command_error(ctx, error):
     elif isinstance(error, commands.CommandNotFound):
         wrong = ctx.message.content.split()[0].lstrip("!").lower()
         all_cmds = [c.name for c in bot.commands] + list(COMMAND_HELP.keys())
-        # Eğer yanlış komut zaten listede varsa (örneğin price) önerme yapma, sorun başka bir yerdedir
         if wrong in all_cmds:
-            # Komut aslında var, ama neden hata aldı bilinmez, tekrar denenmesini söyle
             await ctx.send(f"❓ Command `!{wrong}` exists but failed. Please try again.")
         else:
             matches = difflib.get_close_matches(wrong, list(set(all_cmds)), n=1, cutoff=0.5)
@@ -657,7 +664,7 @@ async def on_command_error(ctx, error):
         await ctx.send("❌ An unexpected error occurred. The admin has been notified.")
 
 # ====================================================================
-# 🧪 KOMUTLAR (PRICE KOMUTU GARANTİ ALTINDA)
+# 🧪 KOMUTLAR
 # ====================================================================
 @bot.command()
 async def ping(ctx): await ctx.send(f"Pong! {round(bot.latency*1000)}ms")
@@ -665,7 +672,7 @@ async def ping(ctx): await ctx.send(f"Pong! {round(bot.latency*1000)}ms")
 @bot.command()
 async def info(ctx):
     embed = discord.Embed(title="🤖 HellFrame Quant Engine", description="Advanced trading analysis bot.", color=discord.Color.blurple())
-    embed.add_field(name="Version", value="v4.8.2", inline=True)
+    embed.add_field(name="Version", value="v4.8.3", inline=True)
     embed.add_field(name="Prefix", value="`!`", inline=True)
     embed.add_field(name="Plans", value="Daily $3 | Weekly $18 | Monthly $54", inline=False)
     embed.add_field(name="Get Started", value="Use `!plans` to see details or `!help` for commands.", inline=False)
@@ -695,7 +702,7 @@ async def plans_cmd(ctx):
                     value=PLAN_BENEFITS["monthly"], inline=False)
     embed.add_field(name="How to Subscribe",
                     value="Use `!subscribe daily`, `!subscribe weekly`, or `!subscribe monthly`.", inline=False)
-    embed.set_footer(text="HellFrame Quant Engine v4.8.2")
+    embed.set_footer(text="HellFrame Quant Engine v4.8.3")
     await ctx.send(embed=embed)
 
 @bot.command()
@@ -771,18 +778,15 @@ async def myassets(ctx):
     lines = [f"**{i}.** {t} – ${get_price(t):,.4f}" if get_price(t) else f"**{i}.** {t} – N/A" for i,t in enumerate(assets,1)]
     await ctx.send(f"📋 **Watchlist ({len(assets)}/{limit}):**\n"+"\n".join(lines))
 
-# PRICE KOMUTU (EN BAŞTA, TAM GARANTİ)
 @bot.command(name="price")
 async def price_cmd(ctx, *, ticker: str = None):
     if ticker is None:
-        # Argüman verilmediyse yardım göster
         info = COMMAND_HELP.get("price", {})
         embed = discord.Embed(title="📖 `!price`", description=info.get("desc", "Live price of a ticker."), color=discord.Color.blue())
         embed.add_field(name="Usage", value=f"`{info.get('use', '!price <ticker>')}`", inline=False)
         embed.add_field(name="Example", value=f"`{info.get('ex', '!price XAU')}`", inline=False)
         await ctx.send(embed=embed)
         return
-
     if not is_admin(ctx):
         if load_data().get(str(ctx.author.id), {}).get("status") != "Active":
             return await ctx.send("🔒 Active subscription required. Use `!subscribe`.")
@@ -805,6 +809,91 @@ async def analyze_cmd(ctx, *, t):
             await ctx.send(f"❌ Insufficient data for `{t}`. The ticker may be delisted or not supported. Try `!help price` for aliases.")
         else:
             await ctx.send(embed=build_embed(r))
+
+# ====================================================================
+# 👑 ADMIN ÖZEL: !activate <user_id> <süre> (gizli komut)
+# ====================================================================
+@bot.command(name="activate")
+@commands.check(is_admin)  # Sadece admin kullanabilir
+async def activate_cmd(ctx, user_id: int, *, duration_str: str):
+    """Admin tarafından bir kullanıcıya manuel abonelik süresi tanımlar.
+    Kullanım: !activate <user_id> <miktar> <birim>
+    Örnek:   !activate 8264926492 3 days
+             !activate 8264926492 1 month
+             !activate 8264926492 2 weeks
+    """
+    # Süre string'ini parse et
+    duration_str = duration_str.strip().lower()
+    # Regex ile sayı ve birimi yakala: "3 days", "1 month", "2 weeks"
+    match = re.match(r'(\d+)\s*(day|days|week|weeks|month|months|year|years)$', duration_str)
+    if not match:
+        await ctx.send("❌ Invalid duration format. Examples: `3 days`, `1 week`, `1 month`.")
+        return
+
+    amount = int(match.group(1))
+    unit = match.group(2)
+
+    # Birimi gün cinsine çevir
+    if unit in ('day', 'days'):
+        total_days = amount
+    elif unit in ('week', 'weeks'):
+        total_days = amount * 7
+    elif unit in ('month', 'months'):
+        total_days = amount * 30  # Yaklaşık 30 gün
+    elif unit in ('year', 'years'):
+        total_days = amount * 365
+    else:
+        await ctx.send("❌ Unknown time unit.")
+        return
+
+    if total_days <= 0:
+        await ctx.send("❌ Duration must be positive.")
+        return
+
+    # Kullanıcıya süre ekle (plan olarak 'daily' varsayalım, zaten süre toplamda eklenecek)
+    # add_subscription_time fonksiyonunu doğrudan kullanabiliriz ancak o sadece plan adıyla çalışır.
+    # Burada manuel olarak expiry tarihini güncelleyeceğiz.
+
+    db = load_data()
+    uid = str(user_id)
+    now = datetime.now(timezone.utc)
+    duration_delta = timedelta(days=total_days)
+
+    current_expiry = now
+    if uid in db:
+        try:
+            cur = datetime.fromisoformat(db[uid].get("expiry", now.isoformat()))
+            if cur > now:
+                current_expiry = cur
+        except:
+            pass
+
+    new_expiry = current_expiry + duration_delta
+    db[uid] = {
+        "status": "Active",
+        "plan": "monthly",  # Varsayılan olarak monthly gösterelim
+        "expiry": new_expiry.isoformat(),
+        "assets": db.get(uid, {}).get("assets", []),
+        "intervals": db.get(uid, {}).get("intervals", {}),
+        "payment_method": "admin",
+        "last_paid": now.isoformat()
+    }
+    await save_data(db)
+
+    # Admin'e ve kullanıcıya bildirim
+    try:
+        target_user = await bot.fetch_user(user_id)
+        if target_user:
+            embed = discord.Embed(
+                title="✅ Subscription Activated by Admin",
+                description=f"**{total_days} day(s)** of access granted.\nExpiry: **{new_expiry.strftime('%Y-%m-%d %H:%M UTC')}**",
+                color=discord.Color.green()
+            )
+            await target_user.send(embed=embed)
+    except:
+        pass
+
+    await ctx.send(f"✅ Granted **{total_days} day(s)** access to user ID `{user_id}`. Expiry: {new_expiry.strftime('%Y-%m-%d %H:%M UTC')}")
 
 @bot.command()
 async def addinterval(ctx, ticker: str, minutes: int):
