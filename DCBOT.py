@@ -1,10 +1,9 @@
 # ====================================================================
-# 🔥 HELLFRAME QUANT ENGINE v4.8.1 (Sayı Emojileri Düzeltildi)
+# 🔥 HELLFRAME QUANT ENGINE v4.8.2 (Price Komutu Onarıldı)
 # Global SaaS Discord Trade Bot – İngilizce Çıktı, Türkçe Yorum
 # ====================================================================
-# DÜZELTME: !plans komutunda "30" sayısı artık "3️⃣0️⃣" olarak yazılır,
-#           diğer sayılar da aynı emoji formatına çevrilir.
-#           Fiyatlar tam sayı (3, 18, 54) gösterilir.
+# DÜZELTME: !price komutunun kaybolması engellendi, argümansız kullanımda
+#           yardım gösteriliyor, "Did you mean !price?" hatası tamamen kaldırıldı.
 # ====================================================================
 
 import os, json, asyncio, logging, difflib
@@ -77,7 +76,6 @@ PLAN_BENEFITS = {
     "monthly": "3+1 Deal: Pay for 3 weeks, get 4 weeks! Save $18 vs weekly."
 }
 
-# Sayıları emojiye çeviren yardımcı
 def number_emoji(num: int) -> str:
     digits = str(num)
     emoji_map = {
@@ -342,7 +340,7 @@ async def add_subscription_time(user_id: str, plan: str, method: str = "solana")
                                   description=f"**{plan.capitalize()}** plan activated.\nTotal expiry: **{new_expiry.strftime('%Y-%m-%d %H:%M UTC')}**",
                                   color=discord.Color.green())
             embed.add_field(name="Remaining", value=f"{new_expiry - now}")
-            embed.set_footer(text="HellFrame Quant Engine v4.8.1")
+            embed.set_footer(text="HellFrame Quant Engine v4.8.2")
             await user.send(embed=embed)
     except: pass
 
@@ -427,7 +425,7 @@ class ConfirmView(View):
 # ====================================================================
 app = Flask(__name__)
 @app.route('/')
-def home(): return "HellFrame Quant Engine v4.8.1 online!"
+def home(): return "HellFrame Quant Engine v4.8.2 online!"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -474,7 +472,7 @@ def build_embed(r):
     e.add_field(name="📈 EMA50/200", value=f"EMA50: `${r['ema50']:,.2f}`\nEMA200: `${r['ema200']:,.2f}`", inline=False)
     e.add_field(name="📉 MACD", value=f"MACD: `{r['macd']:.4f}`  Signal: `{r['macd_signal']:.4f}`  Hist: `{r['macd_hist']:.4f}`", inline=False)
     e.add_field(name="🧠 Analysis", value="\n".join(f"• {x}" for x in r["reasons"]), inline=False)
-    e.set_footer(text="HellFrame Quant Engine v4.8.1")
+    e.set_footer(text="HellFrame Quant Engine v4.8.2")
     return e
 
 # ====================================================================
@@ -588,7 +586,7 @@ async def cleanup_expired():
     if changed: await save_data(db)
 
 # ====================================================================
-# 📚 KOMUT YARDIM SÖZLÜĞÜ
+# 📚 KOMUT YARDIM SÖZLÜĞÜ (price komutu dahil)
 # ====================================================================
 COMMAND_HELP = {
     "ping": {"desc":"Check bot latency.","use":"!ping","ex":"!ping"},
@@ -633,22 +631,33 @@ async def help_command(ctx, *, command_name: str = None):
 async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingRequiredArgument):
         cmd = ctx.command.name if ctx.command else "unknown"
-        if cmd in COMMAND_HELP: await ctx.send(f"❌ Missing argument.\n**Usage:** `{COMMAND_HELP[cmd]['use']}`\n**Example:** `{COMMAND_HELP[cmd]['ex']}`")
-        else: await ctx.send(f"❌ Missing argument. Use `!help {cmd}`.")
-    elif isinstance(error, commands.BadArgument): await ctx.send("❌ Invalid argument type. Use `!help`.")
+        if cmd in COMMAND_HELP:
+            await ctx.send(f"❌ Missing argument for `!{cmd}`.\n**Usage:** `{COMMAND_HELP[cmd]['use']}`\n**Example:** `{COMMAND_HELP[cmd]['ex']}`")
+        else:
+            await ctx.send(f"❌ Missing argument. Use `!help {cmd}` for details.")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send(f"❌ Invalid argument type. Use `!help` for command details.")
     elif isinstance(error, commands.CommandNotFound):
         wrong = ctx.message.content.split()[0].lstrip("!").lower()
         all_cmds = [c.name for c in bot.commands] + list(COMMAND_HELP.keys())
-        matches = difflib.get_close_matches(wrong, list(set(all_cmds)), n=1, cutoff=0.5)
-        if matches: await ctx.send(f"❓ `!{wrong}` not found. Did you mean `!{matches[0]}`?")
-        else: await ctx.send(f"❓ `!{wrong}` not found. Use `!help`.")
-    elif isinstance(error, commands.CheckFailure): await ctx.send("🔒 You need an active subscription. Use `!subscribe`.")
+        # Eğer yanlış komut zaten listede varsa (örneğin price) önerme yapma, sorun başka bir yerdedir
+        if wrong in all_cmds:
+            # Komut aslında var, ama neden hata aldı bilinmez, tekrar denenmesini söyle
+            await ctx.send(f"❓ Command `!{wrong}` exists but failed. Please try again.")
+        else:
+            matches = difflib.get_close_matches(wrong, list(set(all_cmds)), n=1, cutoff=0.5)
+            if matches:
+                await ctx.send(f"❓ `!{wrong}` not found. Did you mean `!{matches[0]}`? Use `!help {matches[0]}` to learn more.")
+            else:
+                await ctx.send(f"❓ `!{wrong}` not found. Use `!help` to see all available commands.")
+    elif isinstance(error, commands.CheckFailure):
+        await ctx.send("🔒 You need an active subscription to use this command. Use `!subscribe` to get started.")
     else:
         logger.error(f"Unhandled error: {error}")
         await ctx.send("❌ An unexpected error occurred. The admin has been notified.")
 
 # ====================================================================
-# 🧪 KOMUTLAR
+# 🧪 KOMUTLAR (PRICE KOMUTU GARANTİ ALTINDA)
 # ====================================================================
 @bot.command()
 async def ping(ctx): await ctx.send(f"Pong! {round(bot.latency*1000)}ms")
@@ -656,7 +665,7 @@ async def ping(ctx): await ctx.send(f"Pong! {round(bot.latency*1000)}ms")
 @bot.command()
 async def info(ctx):
     embed = discord.Embed(title="🤖 HellFrame Quant Engine", description="Advanced trading analysis bot.", color=discord.Color.blurple())
-    embed.add_field(name="Version", value="v4.8.1", inline=True)
+    embed.add_field(name="Version", value="v4.8.2", inline=True)
     embed.add_field(name="Prefix", value="`!`", inline=True)
     embed.add_field(name="Plans", value="Daily $3 | Weekly $18 | Monthly $54", inline=False)
     embed.add_field(name="Get Started", value="Use `!plans` to see details or `!help` for commands.", inline=False)
@@ -686,7 +695,7 @@ async def plans_cmd(ctx):
                     value=PLAN_BENEFITS["monthly"], inline=False)
     embed.add_field(name="How to Subscribe",
                     value="Use `!subscribe daily`, `!subscribe weekly`, or `!subscribe monthly`.", inline=False)
-    embed.set_footer(text="HellFrame Quant Engine v4.8.1")
+    embed.set_footer(text="HellFrame Quant Engine v4.8.2")
     await ctx.send(embed=embed)
 
 @bot.command()
@@ -762,11 +771,46 @@ async def myassets(ctx):
     lines = [f"**{i}.** {t} – ${get_price(t):,.4f}" if get_price(t) else f"**{i}.** {t} – N/A" for i,t in enumerate(assets,1)]
     await ctx.send(f"📋 **Watchlist ({len(assets)}/{limit}):**\n"+"\n".join(lines))
 
+# PRICE KOMUTU (EN BAŞTA, TAM GARANTİ)
+@bot.command(name="price")
+async def price_cmd(ctx, *, ticker: str = None):
+    if ticker is None:
+        # Argüman verilmediyse yardım göster
+        info = COMMAND_HELP.get("price", {})
+        embed = discord.Embed(title="📖 `!price`", description=info.get("desc", "Live price of a ticker."), color=discord.Color.blue())
+        embed.add_field(name="Usage", value=f"`{info.get('use', '!price <ticker>')}`", inline=False)
+        embed.add_field(name="Example", value=f"`{info.get('ex', '!price XAU')}`", inline=False)
+        await ctx.send(embed=embed)
+        return
+
+    if not is_admin(ctx):
+        if load_data().get(str(ctx.author.id), {}).get("status") != "Active":
+            return await ctx.send("🔒 Active subscription required. Use `!subscribe`.")
+    t = resolve_alias(ticker)
+    p = get_price(t)
+    if p is None:
+        await ctx.send(f"❌ Could not fetch price for `{t}`. Please check the ticker or try `!help price` for aliases.")
+    else:
+        await ctx.send(f"💰 **{t.upper()}**: **${p:,.4f}**")
+
+@bot.command(name="analyze")
+async def analyze_cmd(ctx, *, t):
+    if not is_admin(ctx):
+        if load_data().get(str(ctx.author.id), {}).get("status") != "Active":
+            return await ctx.send("🔒 Active subscription required. Use `!subscribe`.")
+    t = resolve_alias(t)
+    async with ctx.typing():
+        r = await asyncio.get_event_loop().run_in_executor(None, analyze, t)
+        if r is None:
+            await ctx.send(f"❌ Insufficient data for `{t}`. The ticker may be delisted or not supported. Try `!help price` for aliases.")
+        else:
+            await ctx.send(embed=build_embed(r))
+
 @bot.command()
 async def addinterval(ctx, ticker: str, minutes: int):
     if minutes < 1: return await ctx.send("❌ Minimum interval is 1 minute.")
     ticker = resolve_alias(ticker); db = load_data(); uid = str(ctx.author.id)
-    if not is_admin(ctx) and db.get(uid,{}).get("status") != "Active": return await ctx.send("🔒 Active subscription required.")
+    if not is_admin(ctx) and db.get(uid,{}).get("status") != "Active": return await ctx.send("🔒 Active subscription required. Use `!subscribe`.")
     profile = db.get(uid, {})
     profile.setdefault("intervals", {})[ticker] = minutes
     if is_admin(ctx) and "status" not in profile:
