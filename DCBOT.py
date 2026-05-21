@@ -1,11 +1,11 @@
 # ====================================================================
-# 🔥 HELLFRAME QUANT ENGINE v4.7.1 (Render Ready)
+# 🔥 HELLFRAME QUANT ENGINE v4.8.0 (Nihai Sürüm – Yeni Fiyatlandırma)
 # Global SaaS Discord Trade Bot – İngilizce Çıktı, Türkçe Yorum
 # ====================================================================
-# DÜZELTMELER:
-#   • Flask sunucusu bot başlamadan önce başlatıldı (port sorunu)
-#   • İsteğe bağlı PROXY_URL ortam değişkeni eklendi
-#   • Hata logları daha ayrıntılı hale getirildi
+# YENİ:
+#   • Fiyatlar: Günlük $3, Haftalık $18 (6+1), Aylık $54 (3+1)
+#   • !plans komutu eklendi – avantajlı plan detaylarıyla birlikte
+#   • SOL ödeme doğrulaması yeni fiyatlara göre güncellendi
 # ====================================================================
 
 import os, json, asyncio, logging, difflib
@@ -37,13 +37,12 @@ MY_WALLET_STR = os.getenv("SOLANA_WALLET_ADDRESS")
 ADMIN_ID_RAW = os.getenv("ADMIN_ID")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-PROXY_URL = os.getenv("PROXY_URL")  # Render'da tanımlanırsa kullanılır
-
 STRIPE_PRICE_IDS = {
     "daily": os.getenv("STRIPE_PRICE_DAILY"),
     "weekly": os.getenv("STRIPE_PRICE_WEEKLY"),
     "monthly": os.getenv("STRIPE_PRICE_MONTHLY")
 }
+PROXY_URL = os.getenv("PROXY_URL")
 
 if not TOKEN or not MY_WALLET_STR or not ADMIN_ID_RAW:
     raise ValueError("Missing essential .env variables")
@@ -69,9 +68,16 @@ DATA_FILE, ALERTS_FILE, USED_TX_FILE = "user_subscriptions.json", "price_alerts.
 DB_LOCK, ALERT_LOCK, USED_TX_LOCK = Lock(), Lock(), Lock()
 analysis_semaphore = Semaphore(5)
 
-TIER_PRICES_USD = {"daily": 3.0, "weekly": 15.0, "monthly": 50.0}
+# YENİ FİYATLANDIRMA: Günlük $3, Haftalık $18 (6+1), Aylık $54 (3+1)
+TIER_PRICES_USD = {"daily": 3.0, "weekly": 18.0, "monthly": 54.0}
 PLAN_DURATION = {"daily": 1, "weekly": 7, "monthly": 30}
 PLAN_ASSET_LIMIT = {"daily": 1, "weekly": 2, "monthly": 3}
+# Plan avantaj açıklamaları (İngilizce)
+PLAN_BENEFITS = {
+    "daily": "Standard daily rate.",
+    "weekly": "6+1 Deal: Pay for 6 days, get 7! Save $3 vs daily.",
+    "monthly": "3+1 Deal: Pay for 3 weeks, get 4! Save $18 vs weekly."
+}
 
 RSI_OVERSOLD, RSI_OVERBOUGHT = 30.0, 70.0
 EMA_FAST, EMA_SLOW = 50, 200
@@ -152,24 +158,30 @@ def is_admin(ctx):
 # ====================================================================
 # 📈 PİYASA VERİSİ
 # ====================================================================
-CRYPTO_MAP = {"BTC":"BTC-USD","ETH":"ETH-USD","SOL":"SOL-USD","XRP":"XRP-USD","DOGE":"DOGE-USD","ADA":"ADA-USD","AVAX":"AVAX-USD","DOT":"DOT-USD","MATIC":"MATIC-USD","LINK":"LINK-USD"}
-COMMODITY_MAP = {"GOLD":"GC=F","SILVER":"SI=F","OIL":"CL=F","COPPER":"HG=F","NATGAS":"NG=F"}
-FX_MAP = {"EURUSD":"EURUSD=X","GBPUSD":"GBPUSD=X","USDJPY":"USDJPY=X","USDTRY":"USDTRY=X","EURTRY":"EURTRY=X"}
+CRYPTO_MAP = {"BTC":"BTC-USD","ETH":"ETH-USD","SOL":"SOL-USD","XRP":"XRP-USD","DOGE":"DOGE-USD","ADA":"ADA-USD","AVAX":"AVAX-USD","DOT":"DOT-USD","MATIC":"MATIC-USD","LINK":"LINK-USD","LTC":"LTC-USD","BNB":"BNB-USD"}
+COMMODITY_MAP = {"GOLD":"GC=F","SILVER":"SI=F","OIL":"CL=F","COPPER":"HG=F","NATGAS":"NG=F","BRENT":"BZ=F"}
+FX_MAP = {"EURUSD":"EURUSD=X","GBPUSD":"GBPUSD=X","USDJPY":"USDJPY=X","USDTRY":"USDTRY=X","EURTRY":"EURTRY=X","AUDUSD":"AUDUSD=X","USDCHF":"USDCHF=X","NZDUSD":"NZDUSD=X","USDCAD":"USDCAD=X"}
 
 ALIASES = {
-    "XAU": "GOLD",
-    "XAG": "SILVER",
-    "WTI": "OIL",
-    "EUR": "EURUSD",
-    "EURO": "EURUSD",
+    "XAU": "GOLD", "XAG": "SILVER", "WTI": "OIL", "EUR": "EURUSD", "EURO": "EURUSD",
+    "GBP": "GBPUSD", "TRY": "USDTRY", "LIRA": "USDTRY", "TL": "USDTRY",
+    "JPY": "USDJPY", "CHF": "USDCHF", "AUD": "AUDUSD", "CAD": "USDCAD", "NZD": "NZDUSD",
+    "BNB": "BNB-USD", "BTC": "BTC-USD", "ETH": "ETH-USD", "XRP": "XRP-USD",
 }
 
 def resolve_alias(ticker):
-    return ALIASES.get(ticker.upper().strip(), ticker.upper().strip())
+    t = ticker.upper().strip()
+    if t in ALIASES:
+        return ALIASES[t]
+    if "-USD" in t or "=X" in t or "=F" in t:
+        return t
+    return CRYPTO_MAP.get(t) or COMMODITY_MAP.get(t) or FX_MAP.get(t) or t
 
 def normalize(t):
     t = resolve_alias(t)
-    return CRYPTO_MAP.get(t) or COMMODITY_MAP.get(t) or FX_MAP.get(t) or (t if "-USD" in t or "=X" in t else t)
+    if "-USD" in t or "=X" in t or "=F" in t:
+        return t
+    return CRYPTO_MAP.get(t) or COMMODITY_MAP.get(t) or FX_MAP.get(t) or t
 
 def get_price(t):
     try:
@@ -180,9 +192,9 @@ def get_price(t):
 def get_sol_price():
     return get_price("SOL")
 
-def fetch_ohlcv(t):
+def fetch_ohlcv(t, period="5d", interval="15m"):
     try:
-        df = yf.download(normalize(t), period="5d", interval="15m", progress=False, auto_adjust=True)
+        df = yf.download(normalize(t), period=period, interval=interval, progress=False, auto_adjust=True)
         return df if not df.empty and len(df) >= 50 else None
     except: return None
 
@@ -239,7 +251,7 @@ def analyze(t):
             "score":score,"confidence":conf,"signal":sig,"signal_key":key,"reasons":reasons}
 
 # ====================================================================
-# 🔗 SOLANA DOĞRULAMA
+# 🔗 SOLANA DOĞRULAMA (Yeni fiyatlarla uyumlu)
 # ====================================================================
 async def verify_solana_payment(tx_id: str, plan: str) -> Union[Tuple[bool, str], str]:
     if not tx_id or len(tx_id) < 32:
@@ -297,14 +309,14 @@ async def verify_solana_payment(tx_id: str, plan: str) -> Union[Tuple[bool, str]
     return "FALLBACK"
 
 # ====================================================================
-# 💳 STRIPE
+# 💳 STRIPE (Yeni fiyatlarla uyumlu)
 # ====================================================================
 def create_stripe_session(uid, plan):
     if not STRIPE_SECRET_KEY: return None
     try:
         pid = STRIPE_PRICE_IDS.get(plan)
         if pid:
-            sess = stripe.checkout.Session.create(
+            session = stripe.checkout.Session.create(
                 payment_method_types=['card'],
                 line_items=[{'price': pid, 'quantity': 1}],
                 mode='subscription',
@@ -313,7 +325,7 @@ def create_stripe_session(uid, plan):
                 cancel_url='https://discord.com/channels/@me'
             )
         else:
-            sess = stripe.checkout.Session.create(
+            session = stripe.checkout.Session.create(
                 payment_method_types=['card'],
                 line_items=[{'price_data': {
                     'currency': 'usd',
@@ -326,7 +338,7 @@ def create_stripe_session(uid, plan):
                 success_url='https://discord.com/channels/@me',
                 cancel_url='https://discord.com/channels/@me'
             )
-        return sess.url
+        return session.url
     except Exception as e:
         logger.error(f"Stripe session error: {e}")
         return None
@@ -342,17 +354,14 @@ async def add_subscription_time(user_id: str, plan: str, method: str = "solana")
             cur = datetime.fromisoformat(db[uid].get("expiry", now.isoformat()))
             if cur > now:
                 current_expiry = cur
-        except:
-            pass
+        except: pass
     new_expiry = current_expiry + duration
     db[uid] = {
-        "status": "Active",
-        "plan": plan,
+        "status": "Active", "plan": plan,
         "expiry": new_expiry.isoformat(),
         "assets": db.get(uid, {}).get("assets", []),
         "intervals": db.get(uid, {}).get("intervals", {}),
-        "payment_method": method,
-        "last_paid": now.isoformat()
+        "payment_method": method, "last_paid": now.isoformat()
     }
     await save_data(db)
     try:
@@ -364,10 +373,9 @@ async def add_subscription_time(user_id: str, plan: str, method: str = "solana")
                 color=discord.Color.green()
             )
             embed.add_field(name="Remaining", value=f"{new_expiry - now}")
-            embed.set_footer(text="HellFrame Quant Engine v4.7.1")
+            embed.set_footer(text="HellFrame Quant Engine v4.8.0")
             await user.send(embed=embed)
-    except:
-        pass
+    except: pass
 
 async def cancel_sub(user_id, reason):
     db = load_data()
@@ -378,7 +386,7 @@ async def cancel_sub(user_id, reason):
         await save_data(db)
 
 # ====================================================================
-# 🧩 VIEWLAR
+# 🧩 VIEWLAR (Yeni fiyatlar butonlara yansıtıldı)
 # ====================================================================
 class RenewView(View):
     def __init__(self, uid, plan):
@@ -468,7 +476,7 @@ class ConfirmView(View):
 # ====================================================================
 app = Flask(__name__)
 @app.route('/')
-def home(): return "HellFrame Quant Engine v4.7.1 online!"
+def home(): return "HellFrame Quant Engine v4.8.0 online!"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -499,21 +507,17 @@ def run_flask():
 intents = discord.Intents.default()
 intents.message_content = True
 
-# Proxy ayarı (isteğe bağlı)
 if PROXY_URL:
     proxy = discord.Proxy(url=PROXY_URL, proxy_type=discord.ProxyType.http)
     bot = commands.Bot(command_prefix="!", intents=intents, case_insensitive=True, help_command=None, proxy=proxy)
-    logger.info(f"Using proxy: {PROXY_URL}")
 else:
     bot = commands.Bot(command_prefix="!", intents=intents, case_insensitive=True, help_command=None)
 
 @bot.event
 async def on_ready():
     logger.info(f"Online: {bot.user}")
-    # Flask zaten başlatıldığı için burada tekrar başlatmaya gerek yok
     for loop in [check_user_alerts, check_price_alerts, check_intervals, check_reminders, cleanup_expired]:
-        if not loop.is_running():
-            loop.start()
+        if not loop.is_running(): loop.start()
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="EMA · RSI · MACD · BB"))
 
 def build_embed(r):
@@ -525,7 +529,7 @@ def build_embed(r):
     e.add_field(name="📈 EMA50/200", value=f"EMA50: `${r['ema50']:,.2f}`\nEMA200: `${r['ema200']:,.2f}`", inline=False)
     e.add_field(name="📉 MACD", value=f"MACD: `{r['macd']:.4f}`  Signal: `{r['macd_signal']:.4f}`  Hist: `{r['macd_hist']:.4f}`", inline=False)
     e.add_field(name="🧠 Analysis", value="\n".join(f"• {x}" for x in r["reasons"]), inline=False)
-    e.set_footer(text="HellFrame Quant Engine v4.7.1")
+    e.set_footer(text="HellFrame Quant Engine v4.8.0")
     return e
 
 # ====================================================================
@@ -534,8 +538,7 @@ def build_embed(r):
 @tasks.loop(seconds=60)
 async def check_user_alerts():
     db = load_data()
-    if not hasattr(check_user_alerts, "last"):
-        check_user_alerts.last = {}
+    if not hasattr(check_user_alerts, "last"): check_user_alerts.last = {}
     now = datetime.now(timezone.utc).timestamp()
     tasks = []
     for uid, p in db.items():
@@ -584,32 +587,24 @@ async def check_price_alerts():
 @tasks.loop(seconds=60)
 async def check_intervals():
     db = load_data()
-    if not hasattr(check_intervals, "last_sent"):
-        check_intervals.last_sent = {}
+    if not hasattr(check_intervals, "last_sent"): check_intervals.last_sent = {}
     now = datetime.now(timezone.utc)
     for uid, profile in db.items():
         if profile.get("status") != "Active": continue
         intervals = profile.get("intervals", {})
         if not intervals: continue
         for ticker, mins in intervals.items():
-            try:
-                mins = int(mins)
-                if mins < 1: mins = 1
+            try: mins = max(1, int(mins))
             except: continue
             key = f"{uid}:{ticker}"
             last_time = check_intervals.last_sent.get(key, datetime.min.replace(tzinfo=timezone.utc))
             if now - last_time >= timedelta(minutes=mins):
                 price = get_price(ticker)
-                if price is not None:
+                if price:
                     try:
                         u = await bot.fetch_user(int(uid))
                         if u:
-                            embed = discord.Embed(
-                                title="⏰ Periodic Price Update",
-                                description=f"**{ticker}** is now **${price:,.4f}**",
-                                color=discord.Color.blue(),
-                                timestamp=now
-                            )
+                            embed = discord.Embed(title="⏰ Periodic Price Update", description=f"**{ticker}** is now **${price:,.4f}**", color=discord.Color.blue(), timestamp=now)
                             embed.set_footer(text=f"Interval: every {mins} minute(s)")
                             await u.send(embed=embed)
                             check_intervals.last_sent[key] = now
@@ -626,15 +621,12 @@ async def check_reminders():
         except: continue
         rem = exp - now
         plan = p.get("plan", "daily")
-        if (plan == "daily" and timedelta(0) < rem <= timedelta(hours=1)) or \
-           (plan != "daily" and timedelta(0) < rem <= timedelta(hours=24)):
+        if (plan == "daily" and timedelta(0) < rem <= timedelta(hours=1)) or (plan != "daily" and timedelta(0) < rem <= timedelta(hours=24)):
             if not p.get(sent_key):
                 try:
                     u = await bot.fetch_user(int(uid))
                     if u:
-                        emb = discord.Embed(title="⏳ Subscription Renewal",
-                                            description=f"Your **{plan.capitalize()}** plan expires in {rem}.",
-                                            color=discord.Color.gold())
+                        emb = discord.Embed(title="⏳ Subscription Renewal", description=f"Your **{plan.capitalize()}** plan expires in {rem}.", color=discord.Color.gold())
                         await u.send(embed=emb, view=RenewView(int(uid), plan))
                         db[uid][sent_key] = True
                         await save_data(db)
@@ -656,15 +648,16 @@ async def cleanup_expired():
     if changed: await save_data(db)
 
 # ====================================================================
-# 📚 KOMUT YARDIM SÖZLÜĞÜ
+# 📚 KOMUT YARDIM SÖZLÜĞÜ (Güncellendi)
 # ====================================================================
 COMMAND_HELP = {
     "ping": {"desc": "Check bot latency.", "use": "!ping", "ex": "!ping"},
     "info": {"desc": "Show bot information and features.", "use": "!info", "ex": "!info"},
     "mystatus": {"desc": "Check your subscription status and watchlist.", "use": "!mystatus", "ex": "!mystatus"},
+    "plans": {"desc": "View subscription plans with benefits.", "use": "!plans", "ex": "!plans"},
     "subscribe": {"desc": "View plans or subscribe. Add a plan name.", "use": "!subscribe [plan]", "ex": "!subscribe daily"},
     "verify": {"desc": "Verify a SOL payment. Provide tx_id and plan.", "use": "!verify <tx_id> <plan>", "ex": "!verify 5Bmz... daily"},
-    "price": {"desc": "Live price of a ticker. Aliases: XAU, XAG, WTI, EUR.", "use": "!price <ticker>", "ex": "!price XAU"},
+    "price": {"desc": "Live price of a ticker. Aliases: XAU, XAG, WTI, EUR, GBP, TRY, BNB.", "use": "!price <ticker>", "ex": "!price XAU"},
     "analyze": {"desc": "Full technical analysis.", "use": "!analyze <ticker>", "ex": "!analyze SOL"},
     "addasset": {"desc": "Add to watchlist (plan limits apply).", "use": "!addasset <ticker>", "ex": "!addasset GOLD"},
     "removeasset": {"desc": "Remove from watchlist.", "use": "!removeasset <ticker>", "ex": "!removeasset BTC"},
@@ -689,8 +682,7 @@ async def help_command(ctx, *, command_name: str = None):
             all_cmds = list(COMMAND_HELP.keys())
             matches = difflib.get_close_matches(cmd, all_cmds, n=1, cutoff=0.5)
             if matches:
-                suggestion = matches[0]
-                await ctx.send(f"❓ Unknown command `!{cmd}`. Did you mean `!{suggestion}`? Use `!help {suggestion}` for details.")
+                await ctx.send(f"❓ Unknown command `!{cmd}`. Did you mean `!{matches[0]}`? Use `!help {matches[0]}` for details.")
             else:
                 await ctx.send(f"❓ Unknown command `!{cmd}`. Use `!help` to see all commands.")
     else:
@@ -724,7 +716,7 @@ async def on_command_error(ctx, error):
         await ctx.send("❌ An unexpected error occurred. The admin has been notified.")
 
 # ====================================================================
-# 🧪 KOMUTLAR
+# 🧪 KOMUTLAR (YENİ FİYATLAR VE !plans DAHİL)
 # ====================================================================
 @bot.command()
 async def ping(ctx): await ctx.send(f"Pong! {round(bot.latency*1000)}ms")
@@ -732,21 +724,19 @@ async def ping(ctx): await ctx.send(f"Pong! {round(bot.latency*1000)}ms")
 @bot.command()
 async def info(ctx):
     embed = discord.Embed(title="🤖 HellFrame Quant Engine", description="Advanced trading analysis bot.", color=discord.Color.blurple())
-    embed.add_field(name="Version", value="v4.7.1", inline=True)
+    embed.add_field(name="Version", value="v4.8.0", inline=True)
     embed.add_field(name="Prefix", value="`!`", inline=True)
-    embed.add_field(name="Plans", value="Daily $3 | Weekly $15 | Monthly $50", inline=False)
-    embed.add_field(name="Get Started", value="Use `!subscribe` to see plans or `!help` for commands.", inline=False)
+    embed.add_field(name="Plans", value="Daily $3 | Weekly $18 | Monthly $54", inline=False)
+    embed.add_field(name="Get Started", value="Use `!plans` to see details or `!help` for commands.", inline=False)
     await ctx.send(embed=embed)
 
 @bot.command()
 async def mystatus(ctx):
     if is_admin(ctx):
         return await ctx.send(embed=discord.Embed(title="👑 Admin", description="Full access.", color=discord.Color.purple()))
-    db = load_data()
-    uid = str(ctx.author.id)
-    p = db.get(uid)
+    db = load_data(); uid = str(ctx.author.id); p = db.get(uid)
     if not p or p.get("status") != "Active":
-        return await ctx.send("❌ No active subscription. Use `!subscribe` to choose a plan.")
+        return await ctx.send("❌ No active subscription. Use `!plans` to choose a plan.")
     embed = discord.Embed(title="📊 Your Status", color=discord.Color.green())
     embed.add_field(name="Plan", value=p.get("plan","daily").capitalize())
     embed.add_field(name="Expiry", value=p.get("expiry","?")[:19].replace("T"," "))
@@ -755,47 +745,60 @@ async def mystatus(ctx):
     if p.get("intervals"): embed.add_field(name="Intervals", value=", ".join(f"{t} ({m}m)" for t,m in p["intervals"].items()), inline=False)
     await ctx.send(embed=embed)
 
-@bot.command()
-async def price(ctx, *, t):
-    if not is_admin(ctx):
-        if load_data().get(str(ctx.author.id), {}).get("status") != "Active":
-            return await ctx.send("🔒 Active subscription required. Use `!subscribe`.")
-    t = resolve_alias(t)
-    p = get_price(t)
-    if p is None:
-        await ctx.send(f"❌ Could not fetch price for `{t}`.")
-    else:
-        await ctx.send(f"💰 **{t.upper()}**: **${p:,.4f}**")
-
-@bot.command(name="analyze")
-async def analyze_cmd(ctx, *, t):
-    if not is_admin(ctx):
-        if load_data().get(str(ctx.author.id), {}).get("status") != "Active":
-            return await ctx.send("🔒 Active subscription required. Use `!subscribe`.")
-    t = resolve_alias(t)
-    async with ctx.typing():
-        r = await asyncio.get_event_loop().run_in_executor(None, analyze, t)
-        if r is None:
-            await ctx.send(f"❌ Insufficient data for `{t}`.")
-        else:
-            await ctx.send(embed=build_embed(r))
+@bot.command(name="plans")
+async def plans_cmd(ctx):
+    """Detaylı plan bilgilerini gösterir."""
+    embed = discord.Embed(
+        title="💎 Subscription Plans",
+        description="Choose the plan that fits your trading style.",
+        color=discord.Color.gold()
+    )
+    embed.add_field(
+        name=f"1️⃣ Daily – ${TIER_PRICES_USD['daily']:.2f}",
+        value=PLAN_BENEFITS["daily"],
+        inline=False
+    )
+    embed.add_field(
+        name=f"7️⃣ Weekly – ${TIER_PRICES_USD['weekly']:.2f}",
+        value=PLAN_BENEFITS["weekly"],
+        inline=False
+    )
+    embed.add_field(
+        name=f"30️⃣ Monthly – ${TIER_PRICES_USD['monthly']:.2f}",
+        value=PLAN_BENEFITS["monthly"],
+        inline=False
+    )
+    embed.add_field(
+        name="How to Subscribe",
+        value="Use `!subscribe daily`, `!subscribe weekly`, or `!subscribe monthly`.",
+        inline=False
+    )
+    embed.set_footer(text="HellFrame Quant Engine v4.8.0")
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def subscribe(ctx, *, plan=None):
     if plan not in TIER_PRICES_USD:
-        emb = discord.Embed(title="💎 Plans", color=discord.Color.gold())
-        for k, v in TIER_PRICES_USD.items(): emb.add_field(name=k.capitalize(), value=f"${v}", inline=True)
-        return await ctx.send(embed=emb)
+        return await ctx.invoke(plans_cmd)  # Plans komutunu göster
+
     sol_price = get_sol_price()
     emb = discord.Embed(title=f"Subscribe {plan.capitalize()}", color=discord.Color.blue())
+    emb.add_field(name="📌 Plan", value=f"**{plan.capitalize()}** – **${TIER_PRICES_USD[plan]:.2f}**\n{PLAN_BENEFITS.get(plan, '')}", inline=False)
+
     if sol_price:
         required = TIER_PRICES_USD[plan] / sol_price
-        emb.add_field(name="🪙 SOL", value=f"Send **{required:.4f} SOL** (≈ ${TIER_PRICES_USD[plan]:.2f}) to:\n`{MY_WALLET_STR}`\nThen `!verify <tx_id> {plan}`", inline=False)
+        emb.add_field(
+            name="🪙 Pay with SOL",
+            value=f"Send **{required:.4f} SOL** (≈ ${TIER_PRICES_USD[plan]:.2f}) to:\n`{MY_WALLET_STR}`\nThen `!verify <tx_id> {plan}`",
+            inline=False
+        )
     else:
         emb.add_field(name="🪙 SOL", value="Could not fetch SOL price. Try again later.", inline=False)
+
     if STRIPE_SECRET_KEY:
         url = create_stripe_session(str(ctx.author.id), plan)
         if url: emb.add_field(name="💳 Card", value=f"[Click here]({url})", inline=False)
+
     await ctx.send(embed=emb)
 
 @bot.command()
@@ -826,31 +829,26 @@ async def addasset(ctx, *, t):
         if t in assets: return await ctx.send(f"⚠️ `{t}` already in watchlist.")
         assets.append(t)
         profile["assets"] = assets
-        profile.setdefault("status","Active")
-        profile.setdefault("plan","daily")
+        profile.setdefault("status","Active"); profile.setdefault("plan","daily")
         profile.setdefault("expiry", (datetime.now(timezone.utc)+timedelta(days=36500)).isoformat())
         db[uid] = profile
         await save_data(db)
         return await ctx.send(f"✅ Added `{t}` (admin mode).")
-    db = load_data(); uid = str(ctx.author.id)
-    profile = db.get(uid)
+    db = load_data(); uid = str(ctx.author.id); profile = db.get(uid)
     if not profile or profile.get("status") != "Active":
         return await ctx.send("🔒 Active subscription required. Use `!subscribe`.")
-    plan = profile.get("plan","daily")
-    limit = PLAN_ASSET_LIMIT.get(plan, 1)
+    plan = profile.get("plan","daily"); limit = PLAN_ASSET_LIMIT.get(plan, 1)
     assets = profile.get("assets", [])
     if t in assets: return await ctx.send(f"⚠️ `{t}` already in watchlist.")
     if len(assets) >= limit:
         return await ctx.send(f"❌ Your {plan} plan allows max {limit} asset(s). Remove one first with `!removeasset`.")
-    assets.append(t)
-    profile["assets"] = assets
+    assets.append(t); profile["assets"] = assets
     await save_data(db)
     await ctx.send(f"✅ Added `{t}` ({len(assets)}/{limit}).")
 
 @bot.command()
 async def removeasset(ctx, *, t):
-    t = resolve_alias(t)
-    db = load_data(); uid = str(ctx.author.id)
+    t = resolve_alias(t); db = load_data(); uid = str(ctx.author.id)
     if uid not in db: return await ctx.send("❌ No subscription found.")
     assets = db[uid].get("assets", [])
     if t in assets:
@@ -862,34 +860,29 @@ async def removeasset(ctx, *, t):
 
 @bot.command()
 async def myassets(ctx):
-    db = load_data(); uid = str(ctx.author.id)
-    profile = db.get(uid)
+    db = load_data(); uid = str(ctx.author.id); profile = db.get(uid)
     if is_admin(ctx):
         assets = profile.get("assets",[]) if profile else []
-        if not assets: return await ctx.send("📋 Your watchlist is empty. Use `!addasset <ticker>`.")
-        lines = [f"**{i}.** {t}" for i,t in enumerate(assets,1)]
-        return await ctx.send("📋 **Admin Watchlist:**\n"+"\n".join(lines))
+        if not assets: return await ctx.send("📋 Empty. Use `!addasset <ticker>`.")
+        return await ctx.send("📋 **Admin Watchlist:**\n"+"\n".join(f"**{i}.** {t}" for i,t in enumerate(assets,1)))
     if not profile or profile.get("status") != "Active":
         return await ctx.send("🔒 Active subscription required. Use `!subscribe`.")
     assets = profile.get("assets",[])
-    if not assets: return await ctx.send("📋 Your watchlist is empty. Use `!addasset <ticker>`.")
-    plan = profile.get("plan","daily")
-    limit = PLAN_ASSET_LIMIT.get(plan,1)
+    if not assets: return await ctx.send("📋 Empty. Use `!addasset <ticker>`.")
+    plan = profile.get("plan","daily"); limit = PLAN_ASSET_LIMIT.get(plan,1)
     lines = [f"**{i}.** {t} – ${get_price(t):,.4f}" if get_price(t) else f"**{i}.** {t} – N/A" for i,t in enumerate(assets,1)]
-    await ctx.send(f"📋 **Your Watchlist ({len(assets)}/{limit}):**\n"+"\n".join(lines))
+    await ctx.send(f"📋 **Watchlist ({len(assets)}/{limit}):**\n"+"\n".join(lines))
 
 @bot.command()
 async def addinterval(ctx, ticker: str, minutes: int):
     if minutes < 1: return await ctx.send("❌ Minimum interval is 1 minute.")
-    ticker = resolve_alias(ticker)
-    db = load_data(); uid = str(ctx.author.id)
+    ticker = resolve_alias(ticker); db = load_data(); uid = str(ctx.author.id)
     if not is_admin(ctx) and db.get(uid,{}).get("status") != "Active":
         return await ctx.send("🔒 Active subscription required. Use `!subscribe`.")
     profile = db.get(uid, {})
     profile.setdefault("intervals", {})[ticker] = minutes
     if is_admin(ctx) and "status" not in profile:
-        profile["status"] = "Active"
-        profile["plan"] = "daily"
+        profile["status"] = "Active"; profile["plan"] = "daily"
         profile["expiry"] = (datetime.now(timezone.utc)+timedelta(days=36500)).isoformat()
     db[uid] = profile
     await save_data(db)
@@ -897,8 +890,7 @@ async def addinterval(ctx, ticker: str, minutes: int):
 
 @bot.command()
 async def removeinterval(ctx, *, ticker: str):
-    ticker = resolve_alias(ticker)
-    db = load_data(); uid = str(ctx.author.id)
+    ticker = resolve_alias(ticker); db = load_data(); uid = str(ctx.author.id)
     if "intervals" not in db.get(uid,{}): return await ctx.send("❌ No intervals set.")
     if ticker in db[uid]["intervals"]:
         del db[uid]["intervals"][ticker]
@@ -915,13 +907,8 @@ async def myintervals(ctx):
         return await ctx.send("🔒 Active subscription required.")
     intervals = db.get(uid,{}).get("intervals",{})
     if not intervals: return await ctx.send("📋 No intervals. Use `!addinterval <ticker> <minutes>`.")
-    msg = "\n".join(f"• **{t}**: every {m} min" for t,m in intervals.items())
-    await ctx.send(f"📋 **Your intervals:**\n{msg}")
+    await ctx.send("📋 **Intervals:**\n"+"\n".join(f"• **{t}**: every {m} min" for t,m in intervals.items()))
 
-# ====================================================================
-# 🚀 BAŞLAT (Flask önce başlatılır)
-# ====================================================================
 if __name__ == "__main__":
-    # Flask sunucusunu bot'tan önce başlat (port hatası için)
     Thread(target=run_flask, daemon=True).start()
     bot.run(TOKEN)
