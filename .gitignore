@@ -1,7 +1,65 @@
+# === Çevre Değişkenleri (.env) ===
+# Kesinlikle GitHub'a yüklenmemesi gereken en kritik dosya
 .env
-bot_production.log
+
+# === SQLite Veritabanları ===
+# Lisans ve kullanıcı bilgilerini içerir
+*.db
+*.sqlite
+*.sqlite3
+
+# === JSON Veritabanları (Kullanıcı ve Abonelik Verileri) ===
 user_subscriptions.json
 price_alerts.json
 used_transactions.json
-*.tmp
+
+# === Log Dosyaları ===
+# Bot çalışma kayıtları, hata ayıklama bilgileri içerebilir
+*.log
+logs/
+
+# === Python Önbellek ve Derleme Dosyaları ===
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# === Sanal Ortam (venv) ===
+# Kütüphanelerin kurulu olduğu klasör, boyutu büyüktür ve ortama özeldir
+venv/
+env/
+.venv
+
+# === Dağıtım / Paketleme ===
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# === VS Code ve IDE Ayarları ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# === İşletim Sistemi Dosyaları ===
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# === Stripe veya Ödeme Geçici Dosyaları ===
+# (Opsiyonel, eğer Stripe CLI kullanıyorsan)
+.stripe/

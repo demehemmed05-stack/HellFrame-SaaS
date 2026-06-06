@@ -1,12 +1,13 @@
 # ====================================================================
-# 🔥 HELLFRAME QUANT ENGINE v4.8.3 (Admin Activate Komutu Eklendi)
+# 🔥 HELLFRAME QUANT ENGINE v5.0.1 (Güvenli .env Yükleme + Katı Doğrulama)
 # Global SaaS Discord Trade Bot – İngilizce Çıktı, Türkçe Yorum
 # ====================================================================
-# YENİ: !activate <user_id> <duration> – Admin istediği kullanıcıya
-#        manuel süre tanımlar. !help'te gizlidir.
+# GÜNCELLEME: .env yüklemesi güçlendirildi, kritik değişkenler için
+#             zorunlu kontrol ve os._exit(1) ile güvenli kapatma eklendi.
+#             YOUR_SERVER_ID, rol ID'leri artık .env'den okunuyor.
 # ====================================================================
 
-import os, json, asyncio, logging, difflib, re
+import os, json, asyncio, logging, difflib, re, sqlite3
 from pathlib import Path
 from asyncio import Lock, Semaphore
 from threading import Thread
@@ -26,31 +27,70 @@ from flask import Flask, request, jsonify
 import stripe
 
 # ====================================================================
-# 🔐 ENV
+# 🔐 .env YÜKLEME VE SIKI GÜVENLİK KONTROLÜ (GÜNCELLENDİ)
 # ====================================================================
-load_dotenv()
+load_dotenv(override=True)
+
+# Ana değişkenleri .env'den çek
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-SOLANA_RPC_URLS = [u.strip() for u in os.getenv("SOLANA_RPC_URLS", os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")).split(",") if u.strip()]
+SOLANA_RPC_URLS = [u.strip() for u in os.getenv("SOLANA_RPC_URLS", "").split(",") if u.strip()]
 MY_WALLET_STR = os.getenv("SOLANA_WALLET_ADDRESS")
 ADMIN_ID_RAW = os.getenv("ADMIN_ID")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-STRIPE_PRICE_IDS = {
-    "daily": os.getenv("STRIPE_PRICE_DAILY"),
-    "weekly": os.getenv("STRIPE_PRICE_WEEKLY"),
-    "monthly": os.getenv("STRIPE_PRICE_MONTHLY")
-}
 PROXY_URL = os.getenv("PROXY_URL")
+YOUR_SERVER_ID = os.getenv("YOUR_SERVER_ID")
+OMEGA_ROLE_ID = os.getenv("OMEGA_ROLE_ID")
+VECTOR_ROLE_ID = os.getenv("VECTOR_ROLE_ID")
+ALPHA_ROLE_ID = os.getenv("ALPHA_ROLE_ID")
 
-if not TOKEN or not MY_WALLET_STR or not ADMIN_ID_RAW:
-    raise ValueError("Missing essential .env variables")
+# Stripe Price ID'leri (opsiyonel)
+STRIPE_PRICE_DAILY = os.getenv("STRIPE_PRICE_DAILY")
+STRIPE_PRICE_WEEKLY = os.getenv("STRIPE_PRICE_WEEKLY")
+STRIPE_PRICE_MONTHLY = os.getenv("STRIPE_PRICE_MONTHLY")
+
+# Kritik değişkenlerin tanımlı olduğunu doğrula
+REQUIRED_VARS = {
+    "DISCORD_BOT_TOKEN": TOKEN,
+    "YOUR_SERVER_ID": YOUR_SERVER_ID,
+    "OMEGA_ROLE_ID": OMEGA_ROLE_ID,
+    "VECTOR_ROLE_ID": VECTOR_ROLE_ID,
+    "ALPHA_ROLE_ID": ALPHA_ROLE_ID,
+}
+
+missing_vars = [key for key, value in REQUIRED_VARS.items() if not value]
+
+if missing_vars:
+    print(f"[🚨 SECURITY ERROR] Missing essential .env variables: {', '.join(missing_vars)}")
+    os._exit(1)
+
+# Kritik ID'leri tam sayıya çevir
+YOUR_SERVER_ID = int(YOUR_SERVER_ID)
+OMEGA_ROLE_ID = int(OMEGA_ROLE_ID)
+VECTOR_ROLE_ID = int(VECTOR_ROLE_ID)
+ALPHA_ROLE_ID = int(ALPHA_ROLE_ID)
+
+# Opsiyonel olanları dönüştür (None kalabilir)
+if ADMIN_ID_RAW:
+    try:
+        ADMIN_ID = int(ADMIN_ID_RAW)
+    except ValueError:
+        print("[🚨 SECURITY ERROR] ADMIN_ID must be a numeric Discord user ID.")
+        os._exit(1)
+else:
+    ADMIN_ID = 0  # Fallback, fakat is_admin fonksiyonu çalışmaz
+
+if MY_WALLET_STR:
+    MY_WALLET = Pubkey.from_string(MY_WALLET_STR)
+else:
+    MY_WALLET = None  # SOL ödemeleri çalışmaz
+
 if STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
-try:
-    ADMIN_ID = int(ADMIN_ID_RAW)
-except ValueError:
-    raise ValueError("ADMIN_ID must be numeric")
-MY_WALLET = Pubkey.from_string(MY_WALLET_STR)
+
+# Solana RPC URL'leri boş ise varsayılan ekle
+if not SOLANA_RPC_URLS:
+    SOLANA_RPC_URLS = ["https://api.mainnet-beta.solana.com"]
 
 # ====================================================================
 # 📊 LOGGING
@@ -60,16 +100,80 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("HellFrameQuant")
 
 # ====================================================================
-# 📁 VERİTABANI
+# 🗄️ SQLITE VERİTABANI
 # ====================================================================
-DATA_FILE, ALERTS_FILE, USED_TX_FILE = "user_subscriptions.json", "price_alerts.json", "used_transactions.json"
-DB_LOCK, ALERT_LOCK, USED_TX_LOCK = Lock(), Lock(), Lock()
+DB_FILE = "hellframe_licenses.db"
+
+def init_db():
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS used_txids (
+                txid TEXT PRIMARY KEY
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS licenses (
+                discord_id TEXT PRIMARY KEY,
+                role_id INTEGER,
+                expire_time TEXT
+            )
+        """)
+        conn.commit()
+init_db()
+
+def db_add_txid(txid: str) -> bool:
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.execute("INSERT INTO used_txids VALUES (?)", (txid,))
+            conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+def db_has_txid(txid: str) -> bool:
+    with sqlite3.connect(DB_FILE) as conn:
+        row = conn.execute("SELECT 1 FROM used_txids WHERE txid = ?", (txid,)).fetchone()
+        return row is not None
+
+def db_get_license(discord_id: str):
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM licenses WHERE discord_id = ?", (discord_id,)).fetchone()
+        return dict(row) if row else None
+
+def db_set_license(discord_id: str, role_id: int, expire_time: str):
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO licenses (discord_id, role_id, expire_time)
+            VALUES (?, ?, ?)
+        """, (discord_id, role_id, expire_time))
+        conn.commit()
+
+def db_delete_license(discord_id: str):
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("DELETE FROM licenses WHERE discord_id = ?", (discord_id,))
+        conn.commit()
+
+def db_get_all_licenses():
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM licenses").fetchall()
+        return [dict(r) for r in rows]
+
+# ====================================================================
+# 📁 DİĞER VERİLER (JSON)
+# ====================================================================
+DATA_FILE, ALERTS_FILE = "user_subscriptions.json", "price_alerts.json"
+DB_LOCK, ALERT_LOCK = Lock(), Lock()
 analysis_semaphore = Semaphore(5)
 
-TIER_PRICES_USD = {"daily": 3.0, "weekly": 18.0, "monthly": 54.0}
-PLAN_DURATION = {"daily": 1, "weekly": 7, "monthly": 30}
-PLAN_ASSET_LIMIT = {"daily": 1, "weekly": 2, "monthly": 3}
+PLAN_CONFIG = {
+    "daily":   (ALPHA_ROLE_ID,  1,  3.0),
+    "weekly":  (VECTOR_ROLE_ID, 7,  18.0),
+    "monthly": (OMEGA_ROLE_ID,  30, 54.0),
+}
 
+PLAN_ASSET_LIMIT = {"daily": 1, "weekly": 2, "monthly": 3}
 PLAN_BENEFITS = {
     "daily": "Standard daily rate.",
     "weekly": "6+1 Deal: Pay for 6 days, get 7 days! Save $3 vs daily.",
@@ -77,19 +181,15 @@ PLAN_BENEFITS = {
 }
 
 def number_emoji(num: int) -> str:
-    digits = str(num)
-    emoji_map = {
-        '0': '0️⃣', '1': '1️⃣', '2': '2️⃣', '3': '3️⃣', '4': '4️⃣',
-        '5': '5️⃣', '6': '6️⃣', '7': '7️⃣', '8': '8️⃣', '9': '9️⃣'
-    }
-    return ''.join(emoji_map.get(d, d) for d in digits)
+    emoji_map = {'0':'0️⃣','1':'1️⃣','2':'2️⃣','3':'3️⃣','4':'4️⃣','5':'5️⃣','6':'6️⃣','7':'7️⃣','8':'8️⃣','9':'9️⃣'}
+    return ''.join(emoji_map.get(d, d) for d in str(num))
 
 RSI_OVERSOLD, RSI_OVERBOUGHT = 30.0, 70.0
 EMA_FAST, EMA_SLOW = 50, 200
 SIGNAL_COOLDOWN = 3600
 
 def ensure_files():
-    for f, d in [(DATA_FILE, {}), (ALERTS_FILE, {}), (USED_TX_FILE, [])]:
+    for f, d in [(DATA_FILE, {}), (ALERTS_FILE, {})]:
         if not os.path.exists(f):
             with open(f, "w", encoding="utf-8") as fh:
                 json.dump(d, fh)
@@ -108,7 +208,6 @@ async def save_data(data):
             with open(t, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
             os.replace(t, DATA_FILE)
-            asyncio.create_task(backup_db("Subs", data))
         except Exception as e:
             logger.error(f"DB save error: {e}")
 
@@ -128,35 +227,6 @@ async def save_alerts(data):
         except Exception as e:
             logger.error(f"Alert save error: {e}")
 
-async def load_used_txs():
-    async with USED_TX_LOCK:
-        try:
-            with open(USED_TX_FILE, "r", encoding="utf-8") as f:
-                return set(json.load(f))
-        except: return set()
-
-async def add_used_tx(tx):
-    async with USED_TX_LOCK:
-        used = await load_used_txs()
-        used.add(tx)
-        with open(USED_TX_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(used), f)
-
-async def is_tx_used(tx):
-    return tx in await load_used_txs()
-
-async def backup_db(ctx, data):
-    await bot.wait_until_ready()
-    try:
-        u = await bot.fetch_user(ADMIN_ID)
-        if not u: return
-        j = json.dumps(data, indent=2, ensure_ascii=False)
-        p, s = f"📦 **[BACKUP {ctx}]**\n```json\n", "\n```"
-        sz = 1900 - len(p) - len(s)
-        for i in range(0, len(j), sz):
-            await u.send(f"{p}{j[i:i+sz]}{s}")
-    except: pass
-
 def is_admin(ctx):
     return ctx.author.id == ADMIN_ID
 
@@ -167,12 +237,7 @@ CRYPTO_MAP = {"BTC":"BTC-USD","ETH":"ETH-USD","SOL":"SOL-USD","XRP":"XRP-USD","D
 COMMODITY_MAP = {"GOLD":"GC=F","SILVER":"SI=F","OIL":"CL=F","COPPER":"HG=F","NATGAS":"NG=F","BRENT":"BZ=F"}
 FX_MAP = {"EURUSD":"EURUSD=X","GBPUSD":"GBPUSD=X","USDJPY":"USDJPY=X","USDTRY":"USDTRY=X","EURTRY":"EURTRY=X","AUDUSD":"AUDUSD=X","USDCHF":"USDCHF=X","NZDUSD":"NZDUSD=X","USDCAD":"USDCAD=X"}
 
-ALIASES = {
-    "XAU": "GOLD", "XAG": "SILVER", "WTI": "OIL", "EUR": "EURUSD", "EURO": "EURUSD",
-    "GBP": "GBPUSD", "TRY": "USDTRY", "LIRA": "USDTRY", "TL": "USDTRY",
-    "JPY": "USDJPY", "CHF": "USDCHF", "AUD": "AUDUSD", "CAD": "USDCAD", "NZD": "NZDUSD",
-    "BNB": "BNB-USD", "BTC": "BTC-USD", "ETH": "ETH-USD", "XRP": "XRP-USD",
-}
+ALIASES = {"XAU":"GOLD","XAG":"SILVER","WTI":"OIL","EUR":"EURUSD","EURO":"EURUSD","GBP":"GBPUSD","TRY":"USDTRY","LIRA":"USDTRY","TL":"USDTRY","JPY":"USDJPY","CHF":"USDCHF","AUD":"AUDUSD","CAD":"USDCAD","NZD":"NZDUSD","BNB":"BNB-USD","BTC":"BTC-USD","ETH":"ETH-USD","XRP":"XRP-USD"}
 
 def resolve_alias(ticker):
     t = ticker.upper().strip()
@@ -253,42 +318,99 @@ def analyze(t):
             "score":score,"confidence":conf,"signal":sig,"signal_key":key,"reasons":reasons}
 
 # ====================================================================
-# 🔗 SOLANA DOĞRULAMA
+# 🔗 SOLANA DOĞRULAMA (SQLite + Rol Atama Entegre)
 # ====================================================================
-async def verify_solana_payment(tx_id: str, plan: str) -> Union[Tuple[bool, str], str]:
-    if not tx_id or len(tx_id) < 32: return (False, "Invalid transaction ID.")
-    if await is_tx_used(tx_id): return (False, "This transaction has already been used.")
-    usd_price = TIER_PRICES_USD.get(plan)
-    if usd_price is None: return (False, "Invalid plan.")
+async def verify_solana_payment(ctx, tx_id: str, plan: str) -> bool:
+    if not MY_WALLET:
+        await ctx.send("❌ Solana wallet not configured.")
+        return False
+    if not tx_id or len(tx_id) < 32:
+        await ctx.send("❌ Invalid transaction ID.")
+        return False
+    if db_has_txid(tx_id):
+        await ctx.send("🚫 **Double-Spending Alert:** This transaction ID has already been used!")
+        return False
+
+    _, _, usd_price = PLAN_CONFIG.get(plan, (None, None, None))
+    if usd_price is None:
+        await ctx.send("❌ Invalid plan.")
+        return False
+
     sol_price = get_sol_price()
-    if sol_price is None or sol_price <= 0: return "FALLBACK"
+    if sol_price is None or sol_price <= 0:
+        await ctx.send("⏳ Could not fetch SOL price. Try again later.")
+        return False
+
     required_sol = usd_price / sol_price
+
     for rpc in SOLANA_RPC_URLS:
         try:
             async with AsyncClient(rpc) as c:
-                resp = await asyncio.wait_for(c.get_transaction(tx_id, encoding="json", max_supported_transaction_version=0), 10)
-                if not resp or not resp.value: continue
+                resp = await asyncio.wait_for(
+                    c.get_transaction(tx_id, encoding="json", max_supported_transaction_version=0), 10
+                )
+                if not resp or not resp.value:
+                    continue
                 meta = resp.value.meta
-                if meta and meta.err: return (False, "Transaction failed on-chain.")
+                if meta and meta.err:
+                    await ctx.send("❌ Transaction failed on-chain.")
+                    return False
+
                 keys = resp.value.transaction.message.account_keys
-                if MY_WALLET not in keys: return (False, "Payment not sent to the correct wallet.")
+                if MY_WALLET not in keys:
+                    await ctx.send("❌ Payment not sent to the correct wallet.")
+                    return False
+
                 idx = keys.index(MY_WALLET)
                 received_sol = (meta.post_balances[idx] - meta.pre_balances[idx]) / 1_000_000_000
-                if abs(received_sol - required_sol) <= 0.0001:
-                    await add_used_tx(tx_id)
-                    return (True, "")
-                else:
+
+                if abs(received_sol - required_sol) > 0.0001:
                     received_usd = received_sol * sol_price
-                    msg = (f"❌ Incorrect amount received.\n"
-                           f"You sent: **{received_sol:.4f} SOL** (≈ **${received_usd:.2f}**).\n"
-                           f"Required: **${usd_price:.2f}** (≈ **{required_sol:.4f} SOL**).\n"
-                           f"Please send the exact amount and try again.")
-                    return (False, msg)
-        except asyncio.TimeoutError: continue
+                    await ctx.send(
+                        f"❌ Incorrect amount received.\n"
+                        f"You sent: **{received_sol:.4f} SOL** (≈ **${received_usd:.2f}**).\n"
+                        f"Required: **${usd_price:.2f}** (≈ **{required_sol:.4f} SOL**)."
+                    )
+                    return False
+
+                if not db_add_txid(tx_id):
+                    await ctx.send("🚫 Transaction ID already used (race condition).")
+                    return False
+
+                role_id, days, _ = PLAN_CONFIG[plan]
+                now = datetime.now(timezone.utc)
+                expire = now + timedelta(days=days)
+                db_set_license(str(ctx.author.id), role_id, expire.strftime('%Y-%m-%d %H:%M:%S'))
+
+                guild = bot.get_guild(YOUR_SERVER_ID)
+                if guild:
+                    member = guild.get_member(ctx.author.id)
+                    if member:
+                        role = guild.get_role(role_id)
+                        if role:
+                            await member.add_roles(role)
+                            logger.info(f"Rol verildi: {member.display_name} → {role.name}")
+
+                embed = discord.Embed(
+                    title="✅ Payment Verified & License Activated",
+                    description=f"Your **{plan.capitalize()}** plan is now active.",
+                    color=discord.Color.green()
+                )
+                embed.add_field(name="Transaction ID", value=f"`{tx_id}`", inline=False)
+                embed.add_field(name="Expiry Date", value=expire.strftime('%Y-%m-%d %H:%M UTC'), inline=True)
+                embed.add_field(name="Role", value=f"<@&{role_id}>", inline=True)
+                embed.set_footer(text="HellFrame Quant Engine v5.0.1")
+                await ctx.send(embed=embed)
+                return True
+
+        except asyncio.TimeoutError:
+            continue
         except Exception as e:
             logger.error(f"RPC error {rpc}: {e}")
             continue
-    return "FALLBACK"
+
+    await ctx.send("⏳ All RPC nodes unresponsive. Admin will check manually.")
+    return False
 
 # ====================================================================
 # 💳 STRIPE
@@ -296,145 +418,31 @@ async def verify_solana_payment(tx_id: str, plan: str) -> Union[Tuple[bool, str]
 def create_stripe_session(uid, plan):
     if not STRIPE_SECRET_KEY: return None
     try:
-        pid = STRIPE_PRICE_IDS.get(plan)
-        if pid:
-            session = stripe.checkout.Session.create(
-                payment_method_types=['card'], line_items=[{'price': pid, 'quantity': 1}],
-                mode='subscription', metadata={'user_id': uid, 'plan': plan},
-                success_url='https://discord.com/channels/@me', cancel_url='https://discord.com/channels/@me')
-        else:
-            session = stripe.checkout.Session.create(
-                payment_method_types=['card'],
-                line_items=[{'price_data': {
-                    'currency': 'usd',
-                    'product_data': {'name': f'HellFrame - {plan.capitalize()}'},
-                    'unit_amount': int(TIER_PRICES_USD[plan] * 100),
-                    'recurring': {'interval': 'day'} if plan=='daily' else {'interval': 'week'} if plan=='weekly' else {'interval': 'month'}
-                }, 'quantity': 1}],
-                mode='subscription', metadata={'user_id': uid, 'plan': plan},
-                success_url='https://discord.com/channels/@me', cancel_url='https://discord.com/channels/@me')
+        _, _, usd_price = PLAN_CONFIG[plan]
+        session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[{'price_data': {
+                'currency': 'usd',
+                'product_data': {'name': f'HellFrame - {plan.capitalize()}'},
+                'unit_amount': int(usd_price * 100),
+                'recurring': {'interval': 'day'} if plan=='daily' else {'interval': 'week'} if plan=='weekly' else {'interval': 'month'}
+            }, 'quantity': 1}],
+            mode='subscription',
+            metadata={'user_id': uid, 'plan': plan},
+            success_url='https://discord.com/channels/@me',
+            cancel_url='https://discord.com/channels/@me'
+        )
         return session.url
     except Exception as e:
         logger.error(f"Stripe session error: {e}")
         return None
-
-async def add_subscription_time(user_id: str, plan: str, method: str = "admin"):
-    """Bir kullanıcıya abonelik süresi ekler (admin veya ödeme ile)."""
-    db = load_data(); uid = str(user_id)
-    now = datetime.now(timezone.utc)
-    duration = timedelta(days=PLAN_DURATION.get(plan, 0))
-    current_expiry = now
-    if uid in db:
-        try:
-            cur = datetime.fromisoformat(db[uid].get("expiry", now.isoformat()))
-            if cur > now: current_expiry = cur
-        except: pass
-    new_expiry = current_expiry + duration
-    db[uid] = {
-        "status": "Active",
-        "plan": plan,
-        "expiry": new_expiry.isoformat(),
-        "assets": db.get(uid, {}).get("assets", []),
-        "intervals": db.get(uid, {}).get("intervals", {}),
-        "payment_method": method,
-        "last_paid": now.isoformat()
-    }
-    await save_data(db)
-    try:
-        user = await bot.fetch_user(int(user_id))
-        if user:
-            embed = discord.Embed(
-                title="✅ Subscription Activated",
-                description=f"**{plan.capitalize()}** plan activated.\nTotal expiry: **{new_expiry.strftime('%Y-%m-%d %H:%M UTC')}**",
-                color=discord.Color.green()
-            )
-            embed.add_field(name="Remaining", value=f"{new_expiry - now}")
-            embed.set_footer(text="HellFrame Quant Engine v4.8.3")
-            await user.send(embed=embed)
-    except: pass
-
-async def cancel_sub(user_id, reason):
-    db = load_data(); uid = str(user_id)
-    if uid in db:
-        db[uid]["status"] = "Cancelled"; db[uid]["cancel_reason"] = reason
-        await save_data(db)
-
-# ====================================================================
-# 🧩 VIEWLAR
-# ====================================================================
-class RenewView(View):
-    def __init__(self, uid, plan):
-        super().__init__(timeout=86400)
-        self.uid, self.plan = uid, plan
-        b1 = Button(label="Yes, renew", style=discord.ButtonStyle.green); b1.callback = self.yes; self.add_item(b1)
-        b2 = Button(label="No, let it expire", style=discord.ButtonStyle.red); b2.callback = self.no; self.add_item(b2)
-        b3 = Button(label="Change plan", style=discord.ButtonStyle.blurple); b3.callback = self.change; self.add_item(b3)
-
-    async def yes(self, i):
-        if i.user.id != self.uid: return await i.response.send_message("Not yours", ephemeral=True)
-        db = load_data(); method = db.get(str(self.uid),{}).get("payment_method","solana")
-        if method == "stripe":
-            await add_subscription_time(str(self.uid), self.plan, "stripe")
-            await i.response.send_message("Renewed via card!", ephemeral=True)
-        else:
-            sol_price = get_sol_price()
-            if sol_price:
-                required = TIER_PRICES_USD[self.plan] / sol_price
-                await i.response.send_message(f"Send **{required:.4f} SOL** (≈ ${TIER_PRICES_USD[self.plan]:.2f}) to `{MY_WALLET_STR}` then `!verify <tx_id> {self.plan}`", ephemeral=True)
-            else:
-                await i.response.send_message("Could not fetch SOL price, try again later.", ephemeral=True)
-        self.stop()
-
-    async def no(self, i):
-        if i.user.id != self.uid: return await i.response.send_message("Not yours", ephemeral=True)
-        await i.response.send_message("Okay, it will expire.", ephemeral=True)
-        self.stop()
-
-    async def change(self, i):
-        if i.user.id != self.uid: return await i.response.send_message("Not yours", ephemeral=True)
-        await i.response.send_message(view=PlanSelectView(self.uid), ephemeral=True)
-        self.stop()
-
-class PlanSelectView(View):
-    def __init__(self, uid):
-        super().__init__(timeout=300); self.uid = uid
-        for p, pr in TIER_PRICES_USD.items():
-            b = Button(label=f"{p.capitalize()} (${int(pr)})", style=discord.ButtonStyle.grey)
-            b.callback = self._cb(p); self.add_item(b)
-    def _cb(self, plan):
-        async def f(i):
-            if i.user.id != self.uid: return await i.response.send_message("Not yours", ephemeral=True)
-            await i.response.send_message(f"Switch to **{plan.capitalize()}** for **${int(TIER_PRICES_USD[plan])}**?", view=ConfirmView(self.uid, plan), ephemeral=True)
-        return f
-
-class ConfirmView(View):
-    def __init__(self, uid, plan):
-        super().__init__(timeout=120); self.uid, self.plan = uid, plan
-        y = Button(label="Yes, switch", style=discord.ButtonStyle.green); y.callback = self.yes; self.add_item(y)
-        n = Button(label="No", style=discord.ButtonStyle.red); n.callback = self.no; self.add_item(n)
-    async def yes(self, i):
-        if i.user.id != self.uid: return await i.response.send_message("Not yours", ephemeral=True)
-        db = load_data(); method = db.get(str(self.uid),{}).get("payment_method","solana")
-        if method == "stripe":
-            await add_subscription_time(str(self.uid), self.plan, "stripe")
-            await i.response.send_message(f"Switched to {self.plan.capitalize()}!", ephemeral=True)
-        else:
-            sol_price = get_sol_price()
-            if sol_price:
-                required = TIER_PRICES_USD[self.plan] / sol_price
-                await i.response.send_message(f"Send **{required:.4f} SOL** (≈ ${int(TIER_PRICES_USD[self.plan])}) to `{MY_WALLET_STR}` then `!verify <tx_id> {self.plan}`", ephemeral=True)
-            else:
-                await i.response.send_message("Could not fetch SOL price, try again later.", ephemeral=True)
-    async def no(self, i):
-        if i.user.id != self.uid: return await i.response.send_message("Not yours", ephemeral=True)
-        await i.response.send_message("Keeping current plan.", ephemeral=True)
 
 # ====================================================================
 # 🌐 FLASK
 # ====================================================================
 app = Flask(__name__)
 @app.route('/')
-def home(): return "HellFrame Quant Engine v4.8.3 online!"
+def home(): return "HellFrame Quant Engine v5.0.1 online!"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -445,11 +453,16 @@ def webhook():
     if ev['type'] == 'invoice.paid':
         obj = ev['data']['object']
         uid, plan = obj.get('metadata',{}).get('user_id'), obj.get('metadata',{}).get('plan')
-        if uid and plan: asyncio.run_coroutine_threadsafe(add_subscription_time(uid, plan, "stripe"), bot.loop)
-    elif ev['type'] in ['charge.dispute.created','charge.dispute.updated']:
-        ch = stripe.Charge.retrieve(ev['data']['object']['charge'])
-        uid = ch.get('metadata',{}).get('user_id')
-        if uid: asyncio.run_coroutine_threadsafe(cancel_sub(uid, "dispute"), bot.loop)
+        if uid and plan:
+            role_id, days, _ = PLAN_CONFIG[plan]
+            expire = (datetime.now(timezone.utc) + timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+            db_set_license(uid, role_id, expire)
+            guild = bot.get_guild(YOUR_SERVER_ID)
+            if guild:
+                member = guild.get_member(int(uid))
+                if member:
+                    role = guild.get_role(role_id)
+                    if role: asyncio.run_coroutine_threadsafe(member.add_roles(role), bot.loop)
     return jsonify({'ok':True}), 200
 
 def run_flask():
@@ -458,7 +471,7 @@ def run_flask():
 # ====================================================================
 # 🤖 BOT
 # ====================================================================
-intents = discord.Intents.default(); intents.message_content = True
+intents = discord.Intents.default(); intents.message_content = True; intents.members = True
 if PROXY_URL:
     proxy = discord.Proxy(url=PROXY_URL, proxy_type=discord.ProxyType.http)
     bot = commands.Bot(command_prefix="!", intents=intents, case_insensitive=True, help_command=None, proxy=proxy)
@@ -468,7 +481,8 @@ else:
 @bot.event
 async def on_ready():
     logger.info(f"Online: {bot.user}")
-    for loop in [check_user_alerts, check_price_alerts, check_intervals, check_reminders, cleanup_expired]:
+    Thread(target=run_flask, daemon=True).start()
+    for loop in [check_user_alerts, check_price_alerts, check_intervals, check_reminders, cleanup_expired_roles]:
         if not loop.is_running(): loop.start()
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="EMA · RSI · MACD · BB"))
 
@@ -481,7 +495,7 @@ def build_embed(r):
     e.add_field(name="📈 EMA50/200", value=f"EMA50: `${r['ema50']:,.2f}`\nEMA200: `${r['ema200']:,.2f}`", inline=False)
     e.add_field(name="📉 MACD", value=f"MACD: `{r['macd']:.4f}`  Signal: `{r['macd_signal']:.4f}`  Hist: `{r['macd_hist']:.4f}`", inline=False)
     e.add_field(name="🧠 Analysis", value="\n".join(f"• {x}" for x in r["reasons"]), inline=False)
-    e.set_footer(text="HellFrame Quant Engine v4.8.3")
+    e.set_footer(text="HellFrame Quant Engine v5.0.1")
     return e
 
 # ====================================================================
@@ -576,43 +590,74 @@ async def check_reminders():
                     u = await bot.fetch_user(int(uid))
                     if u:
                         emb = discord.Embed(title="⏳ Subscription Renewal", description=f"Your **{plan.capitalize()}** plan expires in {rem}.", color=discord.Color.gold())
-                        await u.send(embed=emb, view=RenewView(int(uid), plan))
+                        await u.send(embed=emb)
                         db[uid][sent_key] = True
                         await save_data(db)
                 except: pass
 
-@tasks.loop(hours=6)
-async def cleanup_expired():
-    db = load_data(); now = datetime.now(timezone.utc); changed = False
-    for uid, p in db.items():
-        if p.get("status") != "Active": continue
-        try: exp = datetime.fromisoformat(p["expiry"])
-        except: continue
-        if now >= exp:
-            p["status"] = "Expired"; changed = True
-            try: await (await bot.fetch_user(int(uid))).send(embed=discord.Embed(title="⌛ Expired", description="Renew with `!subscribe`", color=discord.Color.light_grey()))
-            except: pass
-    if changed: await save_data(db)
+# ====================================================================
+# ⏰ OTTOMATİK SÜRE KONTROLÜ (HER 30 DAKİKADA BİR)
+# ====================================================================
+@tasks.loop(minutes=30)
+async def cleanup_expired_roles():
+    now = datetime.now(timezone.utc)
+    expired = []
+    for lic in db_get_all_licenses():
+        expire_time = datetime.strptime(lic['expire_time'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+        if now >= expire_time:
+            expired.append(lic)
+
+    for lic in expired:
+        discord_id = lic['discord_id']
+        role_id = lic['role_id']
+
+        guild = bot.get_guild(YOUR_SERVER_ID)
+        if guild:
+            member = guild.get_member(int(discord_id))
+            if member:
+                role = guild.get_role(role_id)
+                if role and role in member.roles:
+                    await member.remove_roles(role)
+                    logger.info(f"Rol kaldırıldı: {member.display_name} → {role.name}")
+
+        try:
+            user = await bot.fetch_user(int(discord_id))
+            if user:
+                embed = discord.Embed(
+                    title="⌛ License Expired",
+                    description="Your premium access has ended. The corresponding role has been removed.",
+                    color=discord.Color.red()
+                )
+                embed.add_field(name="Next Step", value="To renew, use `!subscribe` or contact support.")
+                embed.set_footer(text="HellFrame Quant Engine v5.0.1")
+                await user.send(embed=embed)
+        except:
+            pass
+
+        db_delete_license(discord_id)
+
+    if expired:
+        logger.info(f"Cleaned up {len(expired)} expired license(s).")
 
 # ====================================================================
-# 📚 KOMUT YARDIM SÖZLÜĞÜ (activate gizlidir)
+# 📚 KOMUT YARDIM
 # ====================================================================
 COMMAND_HELP = {
     "ping": {"desc":"Check bot latency.","use":"!ping","ex":"!ping"},
-    "info": {"desc":"Show bot information and features.","use":"!info","ex":"!info"},
-    "mystatus": {"desc":"Check your subscription status and watchlist.","use":"!mystatus","ex":"!mystatus"},
-    "plans": {"desc":"View subscription plans with benefits.","use":"!plans","ex":"!plans"},
-    "subscribe": {"desc":"View plans or subscribe. Add a plan name.","use":"!subscribe [plan]","ex":"!subscribe daily"},
-    "verify": {"desc":"Verify a SOL payment. Provide tx_id and plan.","use":"!verify <tx_id> <plan>","ex":"!verify 5Bmz... daily"},
-    "price": {"desc":"Live price of a ticker. Aliases: XAU, XAG, WTI, EUR, GBP, TRY, BNB.","use":"!price <ticker>","ex":"!price XAU"},
+    "info": {"desc":"Show bot information.","use":"!info","ex":"!info"},
+    "mystatus": {"desc":"Check your subscription status.","use":"!mystatus","ex":"!mystatus"},
+    "plans": {"desc":"View subscription plans.","use":"!plans","ex":"!plans"},
+    "subscribe": {"desc":"View plans or subscribe.","use":"!subscribe [plan]","ex":"!subscribe daily"},
+    "verify": {"desc":"Verify SOL payment & get role.","use":"!verify <tx_id> <plan>","ex":"!verify ABC123 daily"},
+    "price": {"desc":"Live price of a ticker.","use":"!price <ticker>","ex":"!price XAU"},
     "analyze": {"desc":"Full technical analysis.","use":"!analyze <ticker>","ex":"!analyze SOL"},
-    "addasset": {"desc":"Add to watchlist (plan limits apply).","use":"!addasset <ticker>","ex":"!addasset GOLD"},
+    "addasset": {"desc":"Add to watchlist.","use":"!addasset <ticker>","ex":"!addasset GOLD"},
     "removeasset": {"desc":"Remove from watchlist.","use":"!removeasset <ticker>","ex":"!removeasset BTC"},
-    "myassets": {"desc":"Show watchlist with live prices.","use":"!myassets","ex":"!myassets"},
-    "addinterval": {"desc":"Price updates every X min (min 1).","use":"!addinterval <ticker> <minutes>","ex":"!addinterval ETH 5"},
-    "removeinterval": {"desc":"Stop price updates for a ticker.","use":"!removeinterval <ticker>","ex":"!removeinterval ETH"},
-    "myintervals": {"desc":"List active price intervals.","use":"!myintervals","ex":"!myintervals"},
-    "help": {"desc":"Show this help. !help <cmd> for details.","use":"!help [command]","ex":"!help analyze"}
+    "myassets": {"desc":"Show your watchlist.","use":"!myassets","ex":"!myassets"},
+    "addinterval": {"desc":"Periodic price updates.","use":"!addinterval <ticker> <minutes>","ex":"!addinterval ETH 5"},
+    "removeinterval": {"desc":"Stop price updates.","use":"!removeinterval <ticker>","ex":"!removeinterval ETH"},
+    "myintervals": {"desc":"List active intervals.","use":"!myintervals","ex":"!myintervals"},
+    "help": {"desc":"Show this help.","use":"!help [command]","ex":"!help analyze"}
 }
 
 @bot.command(name="help")
@@ -626,10 +671,9 @@ async def help_command(ctx, *, command_name: str = None):
             embed.add_field(name="Example", value=f"`{info['ex']}`", inline=False)
             await ctx.send(embed=embed)
         else:
-            all_cmds = list(COMMAND_HELP.keys())
-            matches = difflib.get_close_matches(cmd, all_cmds, n=1, cutoff=0.5)
-            if matches: await ctx.send(f"❓ Unknown command `!{cmd}`. Did you mean `!{matches[0]}`?")
-            else: await ctx.send(f"❓ Unknown command `!{cmd}`. Use `!help` to see all commands.")
+            matches = difflib.get_close_matches(cmd, list(COMMAND_HELP.keys()), n=1, cutoff=0.5)
+            if matches: await ctx.send(f"❓ Did you mean `!{matches[0]}`?")
+            else: await ctx.send(f"❓ Unknown command. Use `!help`.")
     else:
         embed = discord.Embed(title="📚 Command List", description="Use `!help <command>` for details.", color=discord.Color.gold())
         for cmd, info in COMMAND_HELP.items():
@@ -641,27 +685,18 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingRequiredArgument):
         cmd = ctx.command.name if ctx.command else "unknown"
         if cmd in COMMAND_HELP:
-            await ctx.send(f"❌ Missing argument for `!{cmd}`.\n**Usage:** `{COMMAND_HELP[cmd]['use']}`\n**Example:** `{COMMAND_HELP[cmd]['ex']}`")
-        else:
-            await ctx.send(f"❌ Missing argument. Use `!help {cmd}` for details.")
-    elif isinstance(error, commands.BadArgument):
-        await ctx.send(f"❌ Invalid argument type. Use `!help` for command details.")
+            await ctx.send(f"❌ Missing argument.\n**Usage:** `{COMMAND_HELP[cmd]['use']}`")
     elif isinstance(error, commands.CommandNotFound):
         wrong = ctx.message.content.split()[0].lstrip("!").lower()
         all_cmds = [c.name for c in bot.commands] + list(COMMAND_HELP.keys())
-        if wrong in all_cmds:
-            await ctx.send(f"❓ Command `!{wrong}` exists but failed. Please try again.")
-        else:
-            matches = difflib.get_close_matches(wrong, list(set(all_cmds)), n=1, cutoff=0.5)
-            if matches:
-                await ctx.send(f"❓ `!{wrong}` not found. Did you mean `!{matches[0]}`? Use `!help {matches[0]}` to learn more.")
-            else:
-                await ctx.send(f"❓ `!{wrong}` not found. Use `!help` to see all available commands.")
+        matches = difflib.get_close_matches(wrong, list(set(all_cmds)), n=1, cutoff=0.5)
+        if matches: await ctx.send(f"❓ `!{wrong}` not found. Did you mean `!{matches[0]}`?")
+        else: await ctx.send(f"❓ `!{wrong}` not found. Use `!help`.")
     elif isinstance(error, commands.CheckFailure):
-        await ctx.send("🔒 You need an active subscription to use this command. Use `!subscribe` to get started.")
+        await ctx.send("🔒 You need an active subscription.")
     else:
         logger.error(f"Unhandled error: {error}")
-        await ctx.send("❌ An unexpected error occurred. The admin has been notified.")
+        await ctx.send("❌ An unexpected error occurred.")
 
 # ====================================================================
 # 🧪 KOMUTLAR
@@ -672,48 +707,45 @@ async def ping(ctx): await ctx.send(f"Pong! {round(bot.latency*1000)}ms")
 @bot.command()
 async def info(ctx):
     embed = discord.Embed(title="🤖 HellFrame Quant Engine", description="Advanced trading analysis bot.", color=discord.Color.blurple())
-    embed.add_field(name="Version", value="v4.8.3", inline=True)
-    embed.add_field(name="Prefix", value="`!`", inline=True)
+    embed.add_field(name="Version", value="v5.0.1", inline=True)
     embed.add_field(name="Plans", value="Daily $3 | Weekly $18 | Monthly $54", inline=False)
-    embed.add_field(name="Get Started", value="Use `!plans` to see details or `!help` for commands.", inline=False)
     await ctx.send(embed=embed)
 
 @bot.command()
 async def mystatus(ctx):
-    if is_admin(ctx): return await ctx.send(embed=discord.Embed(title="👑 Admin", description="Full access.", color=discord.Color.purple()))
-    db = load_data(); uid = str(ctx.author.id); p = db.get(uid)
-    if not p or p.get("status") != "Active": return await ctx.send("❌ No active subscription. Use `!plans`.")
-    embed = discord.Embed(title="📊 Your Status", color=discord.Color.green())
-    embed.add_field(name="Plan", value=p.get("plan","daily").capitalize())
-    embed.add_field(name="Expiry", value=p.get("expiry","?")[:19].replace("T"," "))
-    embed.add_field(name="Assets", value=f"{len(p.get('assets',[]))}/{PLAN_ASSET_LIMIT.get(p.get('plan','daily'),1)}")
-    if p.get("assets"): embed.add_field(name="Watchlist", value=", ".join(p["assets"]), inline=False)
-    if p.get("intervals"): embed.add_field(name="Intervals", value=", ".join(f"{t} ({m}m)" for t,m in p["intervals"].items()), inline=False)
+    lic = db_get_license(str(ctx.author.id))
+    if not lic:
+        await ctx.send("❌ No active license. Use `!subscribe`.")
+        return
+    expire = datetime.strptime(lic['expire_time'], '%Y-%m-%d %H:%M:%S')
+    now = datetime.now()
+    remaining = expire - now
+    embed = discord.Embed(title="📊 Your License", color=discord.Color.green())
+    embed.add_field(name="Role", value=f"<@&{lic['role_id']}>", inline=True)
+    embed.add_field(name="Expiry", value=expire.strftime('%Y-%m-%d %H:%M UTC'), inline=True)
+    embed.add_field(name="Remaining", value=str(remaining).split('.')[0])
     await ctx.send(embed=embed)
 
 @bot.command(name="plans")
 async def plans_cmd(ctx):
-    embed = discord.Embed(title="💎 Subscription Plans", description="Choose the plan that fits your trading style.", color=discord.Color.gold())
-    embed.add_field(name=f"{number_emoji(1)} Daily – ${int(TIER_PRICES_USD['daily'])}",
-                    value=PLAN_BENEFITS["daily"], inline=False)
-    embed.add_field(name=f"{number_emoji(7)} Weekly – ${int(TIER_PRICES_USD['weekly'])}",
-                    value=PLAN_BENEFITS["weekly"], inline=False)
-    embed.add_field(name=f"{number_emoji(30)} Monthly – ${int(TIER_PRICES_USD['monthly'])}",
-                    value=PLAN_BENEFITS["monthly"], inline=False)
-    embed.add_field(name="How to Subscribe",
-                    value="Use `!subscribe daily`, `!subscribe weekly`, or `!subscribe monthly`.", inline=False)
-    embed.set_footer(text="HellFrame Quant Engine v4.8.3")
+    embed = discord.Embed(title="💎 Subscription Plans", color=discord.Color.gold())
+    for plan, (role_id, days, price) in PLAN_CONFIG.items():
+        benefit = PLAN_BENEFITS.get(plan, "")
+        embed.add_field(name=f"{plan.capitalize()} – ${int(price)}", value=f"{benefit}\nRole: <@&{role_id}>", inline=False)
+    embed.add_field(name="How to Subscribe", value="Use `!subscribe daily`, `!subscribe weekly`, or `!subscribe monthly`.")
     await ctx.send(embed=embed)
 
 @bot.command()
 async def subscribe(ctx, *, plan=None):
-    if plan not in TIER_PRICES_USD: return await ctx.invoke(plans_cmd)
+    if plan not in PLAN_CONFIG:
+        await plans_cmd(ctx)
+        return
+    _, _, usd_price = PLAN_CONFIG[plan]
     sol_price = get_sol_price()
     emb = discord.Embed(title=f"Subscribe {plan.capitalize()}", color=discord.Color.blue())
-    emb.add_field(name="📌 Plan", value=f"**{plan.capitalize()}** – **${int(TIER_PRICES_USD[plan])}**\n{PLAN_BENEFITS.get(plan,'')}", inline=False)
     if sol_price:
-        required = TIER_PRICES_USD[plan] / sol_price
-        emb.add_field(name="🪙 Pay with SOL", value=f"Send **{required:.4f} SOL** (≈ ${int(TIER_PRICES_USD[plan])}) to:\n`{MY_WALLET_STR}`\nThen `!verify <tx_id> {plan}`", inline=False)
+        required = usd_price / sol_price
+        emb.add_field(name="🪙 Pay with SOL", value=f"Send **{required:.4f} SOL** (≈ ${int(usd_price)}) to:\n`{MY_WALLET_STR}`\nThen `!verify <tx_id> {plan}`", inline=False)
     else:
         emb.add_field(name="🪙 SOL", value="Could not fetch SOL price. Try again later.", inline=False)
     if STRIPE_SECRET_KEY:
@@ -723,188 +755,78 @@ async def subscribe(ctx, *, plan=None):
 
 @bot.command()
 async def verify(ctx, tx_id: str, plan: str):
-    if plan not in TIER_PRICES_USD: return await ctx.send("❌ Invalid plan. Use daily, weekly, or monthly.")
-    async with ctx.typing():
-        res = await verify_solana_payment(tx_id, plan)
-        if res == "FALLBACK": await ctx.send("⏳ RPC nodes unresponsive. Admin will check manually.")
-        elif isinstance(res, tuple):
-            success, msg = res
-            if success:
-                await add_subscription_time(str(ctx.author.id), plan, "solana")
-                await ctx.send("✅ Payment verified! Subscription active.")
-            else: await ctx.send(msg or "❌ Verification failed.")
-        else: await ctx.send("❌ Verification failed. Check TX ID.")
+    if plan not in PLAN_CONFIG:
+        return await ctx.send("❌ Invalid plan.")
+    await verify_solana_payment(ctx, tx_id, plan)
 
 @bot.command()
 async def addasset(ctx, *, t):
     t = resolve_alias(t)
-    if is_admin(ctx):
-        db = load_data(); uid = str(ctx.author.id); profile = db.get(uid, {})
-        assets = profile.get("assets", [])
-        if t in assets: return await ctx.send(f"⚠️ `{t}` already in watchlist.")
-        assets.append(t); profile["assets"] = assets
-        profile.setdefault("status","Active"); profile.setdefault("plan","daily")
-        profile.setdefault("expiry", (datetime.now(timezone.utc)+timedelta(days=36500)).isoformat())
-        db[uid] = profile; await save_data(db)
-        return await ctx.send(f"✅ Added `{t}` (admin mode).")
-    db = load_data(); uid = str(ctx.author.id); profile = db.get(uid)
-    if not profile or profile.get("status") != "Active": return await ctx.send("🔒 Active subscription required.")
-    plan = profile.get("plan","daily"); limit = PLAN_ASSET_LIMIT.get(plan, 1)
+    db = load_data(); uid = str(ctx.author.id); profile = db.get(uid, {})
+    lic = db_get_license(uid)
+    if not is_admin(ctx) and not lic:
+        return await ctx.send("🔒 Active subscription required.")
+    plan = "monthly" if lic is None else [k for k,v in PLAN_CONFIG.items() if v[0] == lic['role_id']][0] if lic else "daily"
+    limit = PLAN_ASSET_LIMIT.get(plan, 1)
     assets = profile.get("assets", [])
     if t in assets: return await ctx.send(f"⚠️ `{t}` already in watchlist.")
-    if len(assets) >= limit: return await ctx.send(f"❌ Your {plan} plan allows max {limit} asset(s). Remove one first with `!removeasset`.")
-    assets.append(t); profile["assets"] = assets; await save_data(db)
+    if len(assets) >= limit and not is_admin(ctx):
+        return await ctx.send(f"❌ Max {limit} asset(s). Remove one first.")
+    assets.append(t); profile["assets"] = assets
+    if "status" not in profile: profile["status"] = "Active"
+    db[uid] = profile; await save_data(db)
     await ctx.send(f"✅ Added `{t}` ({len(assets)}/{limit}).")
 
 @bot.command()
 async def removeasset(ctx, *, t):
-    t = resolve_alias(t); db = load_data(); uid = str(ctx.author.id)
+    db = load_data(); uid = str(ctx.author.id)
     if uid not in db: return await ctx.send("❌ No subscription found.")
+    t = resolve_alias(t)
     assets = db[uid].get("assets", [])
     if t in assets: assets.remove(t); await save_data(db); await ctx.send(f"✅ Removed `{t}`.")
-    else: await ctx.send(f"⚠️ `{t}` not in your watchlist.")
+    else: await ctx.send(f"⚠️ `{t}` not in watchlist.")
 
 @bot.command()
 async def myassets(ctx):
-    db = load_data(); uid = str(ctx.author.id); profile = db.get(uid)
-    if is_admin(ctx):
-        assets = profile.get("assets",[]) if profile else []
-        if not assets: return await ctx.send("📋 Empty. Use `!addasset <ticker>`.")
-        return await ctx.send("📋 **Admin Watchlist:**\n"+"\n".join(f"**{i}.** {t}" for i,t in enumerate(assets,1)))
-    if not profile or profile.get("status") != "Active": return await ctx.send("🔒 Active subscription required.")
-    assets = profile.get("assets",[])
-    if not assets: return await ctx.send("📋 Empty. Use `!addasset <ticker>`.")
-    plan = profile.get("plan","daily"); limit = PLAN_ASSET_LIMIT.get(plan,1)
+    db = load_data(); uid = str(ctx.author.id); profile = db.get(uid, {})
+    assets = profile.get("assets", [])
+    if not assets: return await ctx.send("📋 Empty.")
+    lic = db_get_license(uid)
+    plan = "monthly" if lic is None else [k for k,v in PLAN_CONFIG.items() if v[0] == lic['role_id']][0] if lic else "daily"
+    limit = PLAN_ASSET_LIMIT.get(plan, 1)
     lines = [f"**{i}.** {t} – ${get_price(t):,.4f}" if get_price(t) else f"**{i}.** {t} – N/A" for i,t in enumerate(assets,1)]
     await ctx.send(f"📋 **Watchlist ({len(assets)}/{limit}):**\n"+"\n".join(lines))
 
 @bot.command(name="price")
 async def price_cmd(ctx, *, ticker: str = None):
     if ticker is None:
-        info = COMMAND_HELP.get("price", {})
-        embed = discord.Embed(title="📖 `!price`", description=info.get("desc", "Live price of a ticker."), color=discord.Color.blue())
-        embed.add_field(name="Usage", value=f"`{info.get('use', '!price <ticker>')}`", inline=False)
-        embed.add_field(name="Example", value=f"`{info.get('ex', '!price XAU')}`", inline=False)
-        await ctx.send(embed=embed)
+        await ctx.send("Usage: `!price <ticker>` (e.g., `!price BTC`)")
         return
-    if not is_admin(ctx):
-        if load_data().get(str(ctx.author.id), {}).get("status") != "Active":
-            return await ctx.send("🔒 Active subscription required. Use `!subscribe`.")
-    t = resolve_alias(ticker)
-    p = get_price(t)
-    if p is None:
-        await ctx.send(f"❌ Could not fetch price for `{t}`. Please check the ticker or try `!help price` for aliases.")
-    else:
-        await ctx.send(f"💰 **{t.upper()}**: **${p:,.4f}**")
+    if not is_admin(ctx) and not db_get_license(str(ctx.author.id)):
+        return await ctx.send("🔒 Active subscription required.")
+    t = resolve_alias(ticker); p = get_price(t)
+    if p is None: await ctx.send(f"❌ Could not fetch price for `{t}`.")
+    else: await ctx.send(f"💰 **{t.upper()}**: **${p:,.4f}**")
 
 @bot.command(name="analyze")
 async def analyze_cmd(ctx, *, t):
-    if not is_admin(ctx):
-        if load_data().get(str(ctx.author.id), {}).get("status") != "Active":
-            return await ctx.send("🔒 Active subscription required. Use `!subscribe`.")
+    if not is_admin(ctx) and not db_get_license(str(ctx.author.id)):
+        return await ctx.send("🔒 Active subscription required.")
     t = resolve_alias(t)
     async with ctx.typing():
         r = await asyncio.get_event_loop().run_in_executor(None, analyze, t)
-        if r is None:
-            await ctx.send(f"❌ Insufficient data for `{t}`. The ticker may be delisted or not supported. Try `!help price` for aliases.")
-        else:
-            await ctx.send(embed=build_embed(r))
-
-# ====================================================================
-# 👑 ADMIN ÖZEL: !activate <user_id> <süre> (gizli komut)
-# ====================================================================
-@bot.command(name="activate")
-@commands.check(is_admin)  # Sadece admin kullanabilir
-async def activate_cmd(ctx, user_id: int, *, duration_str: str):
-    """Admin tarafından bir kullanıcıya manuel abonelik süresi tanımlar.
-    Kullanım: !activate <user_id> <miktar> <birim>
-    Örnek:   !activate 8264926492 3 days
-             !activate 8264926492 1 month
-             !activate 8264926492 2 weeks
-    """
-    # Süre string'ini parse et
-    duration_str = duration_str.strip().lower()
-    # Regex ile sayı ve birimi yakala: "3 days", "1 month", "2 weeks"
-    match = re.match(r'(\d+)\s*(day|days|week|weeks|month|months|year|years)$', duration_str)
-    if not match:
-        await ctx.send("❌ Invalid duration format. Examples: `3 days`, `1 week`, `1 month`.")
-        return
-
-    amount = int(match.group(1))
-    unit = match.group(2)
-
-    # Birimi gün cinsine çevir
-    if unit in ('day', 'days'):
-        total_days = amount
-    elif unit in ('week', 'weeks'):
-        total_days = amount * 7
-    elif unit in ('month', 'months'):
-        total_days = amount * 30  # Yaklaşık 30 gün
-    elif unit in ('year', 'years'):
-        total_days = amount * 365
-    else:
-        await ctx.send("❌ Unknown time unit.")
-        return
-
-    if total_days <= 0:
-        await ctx.send("❌ Duration must be positive.")
-        return
-
-    # Kullanıcıya süre ekle (plan olarak 'daily' varsayalım, zaten süre toplamda eklenecek)
-    # add_subscription_time fonksiyonunu doğrudan kullanabiliriz ancak o sadece plan adıyla çalışır.
-    # Burada manuel olarak expiry tarihini güncelleyeceğiz.
-
-    db = load_data()
-    uid = str(user_id)
-    now = datetime.now(timezone.utc)
-    duration_delta = timedelta(days=total_days)
-
-    current_expiry = now
-    if uid in db:
-        try:
-            cur = datetime.fromisoformat(db[uid].get("expiry", now.isoformat()))
-            if cur > now:
-                current_expiry = cur
-        except:
-            pass
-
-    new_expiry = current_expiry + duration_delta
-    db[uid] = {
-        "status": "Active",
-        "plan": "monthly",  # Varsayılan olarak monthly gösterelim
-        "expiry": new_expiry.isoformat(),
-        "assets": db.get(uid, {}).get("assets", []),
-        "intervals": db.get(uid, {}).get("intervals", {}),
-        "payment_method": "admin",
-        "last_paid": now.isoformat()
-    }
-    await save_data(db)
-
-    # Admin'e ve kullanıcıya bildirim
-    try:
-        target_user = await bot.fetch_user(user_id)
-        if target_user:
-            embed = discord.Embed(
-                title="✅ Subscription Activated by Admin",
-                description=f"**{total_days} day(s)** of access granted.\nExpiry: **{new_expiry.strftime('%Y-%m-%d %H:%M UTC')}**",
-                color=discord.Color.green()
-            )
-            await target_user.send(embed=embed)
-    except:
-        pass
-
-    await ctx.send(f"✅ Granted **{total_days} day(s)** access to user ID `{user_id}`. Expiry: {new_expiry.strftime('%Y-%m-%d %H:%M UTC')}")
+        if r is None: await ctx.send(f"❌ Insufficient data for `{t}`.")
+        else: await ctx.send(embed=build_embed(r))
 
 @bot.command()
 async def addinterval(ctx, ticker: str, minutes: int):
     if minutes < 1: return await ctx.send("❌ Minimum interval is 1 minute.")
     ticker = resolve_alias(ticker); db = load_data(); uid = str(ctx.author.id)
-    if not is_admin(ctx) and db.get(uid,{}).get("status") != "Active": return await ctx.send("🔒 Active subscription required. Use `!subscribe`.")
+    if not is_admin(ctx) and not db_get_license(uid):
+        return await ctx.send("🔒 Active subscription required.")
     profile = db.get(uid, {})
     profile.setdefault("intervals", {})[ticker] = minutes
-    if is_admin(ctx) and "status" not in profile:
-        profile["status"] = "Active"; profile["plan"] = "daily"
-        profile["expiry"] = (datetime.now(timezone.utc)+timedelta(days=36500)).isoformat()
+    if "status" not in profile: profile["status"] = "Active"
     db[uid] = profile; await save_data(db)
     await ctx.send(f"✅ Updates for `{ticker}` every {minutes} minute(s).")
 
@@ -921,9 +843,10 @@ async def removeinterval(ctx, *, ticker: str):
 @bot.command()
 async def myintervals(ctx):
     db = load_data(); uid = str(ctx.author.id)
-    if not is_admin(ctx) and db.get(uid,{}).get("status") != "Active": return await ctx.send("🔒 Active subscription required.")
+    if not is_admin(ctx) and not db_get_license(uid):
+        return await ctx.send("🔒 Active subscription required.")
     intervals = db.get(uid,{}).get("intervals",{})
-    if not intervals: return await ctx.send("📋 No intervals. Use `!addinterval <ticker> <minutes>`.")
+    if not intervals: return await ctx.send("📋 No intervals.")
     await ctx.send("📋 **Intervals:**\n"+"\n".join(f"• **{t}**: every {m} min" for t,m in intervals.items()))
 
 if __name__ == "__main__":
